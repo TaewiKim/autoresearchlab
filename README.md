@@ -97,7 +97,7 @@ research request (Markdown)
 
 The experiment step covers whatever the design needs, for example a MuJoCo simulation, a public benchmark dataset, or an open-source model installed inside the sandbox.
 
-Each step is done by an agent with one role and one task:
+Each step is done by an agent with one role and one task ([docs/AGENTS.md](docs/AGENTS.md) has who decides what, at which stage, and what each may not do):
 
 | Role | What it does |
 |---|---|
@@ -169,6 +169,7 @@ You need an OpenAI account for the Codex CLI, which runs every agent. API keys f
 |---|---|
 | [docs/INSTALL.md](docs/INSTALL.md) | Installation (Docker and native) and troubleshooting |
 | [docs/CLI.md](docs/CLI.md) | Running a cycle from the command line, step by step |
+| [docs/AGENTS.md](docs/AGENTS.md) | The agents, their roles, who works at each stage, and how they talk |
 | [docs/APIS.md](docs/APIS.md) | Every external service it calls, and which ones need a key |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Environment variables |
 | [docs/architecture.md](docs/architecture.md) | How the harness is built: runtimes, roles, lanes, gates, state on disk |
