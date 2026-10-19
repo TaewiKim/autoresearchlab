@@ -2,11 +2,30 @@
 
 **An autonomous research lab that finds a problem worth solving, then carries it all the way to a reviewed result.**
 
+> **Status: early preview (v0.1).** The pipeline runs end to end, but interfaces, prompts and defaults still change between versions, and no result produced with it has been published yet. Expect rough edges, and please report them.
+
 Give AutoResearchLab a research direction in plain Markdown. A team of AI agents surveys the field, picks the open problem whose answer would change what the field believes, states a falsifiable hypothesis, builds the experiment, preregisters the analysis, runs it, and submits the result to independent reviewers. The reviewers can reject it, and they often do. You watch the whole process in your terminal and step in only where you choose to.
 
-Most automated-science systems are handed a topic and optimize toward an experiment. AutoResearchLab starts one step earlier and sets a higher bar. It asks **what is worth researching**, judges every candidate against the literature, and will not call a result finished because an experiment ran.
-
 ---
+
+## What is different
+
+Many automated-science pipelines are handed a topic and have an LLM brainstorm ideas for it. AutoResearchLab starts one step earlier and asks **what is worth researching**. It treats novelty as something to be tested against the literature, not something the model asserts.
+
+- **The problem comes from the field, not from the tools.** Candidates are written from a map of the field: what it believes, where it is stuck, and what its papers leave unmeasured. The machine's installed tools are hidden while the candidates are written, so nothing is proposed just because it is easy to run here.
+- **Novelty is attacked, not self-rated.** A scout tries to find the paper that already did each of the panel's top ideas. An idea that is found is struck from the slate, with the citation.
+- **Independent experts rank the slate.** Four or five reviewer agents, drawn from the field's own subfields, score every candidate in separate lanes. Their scores stay sealed until all of them have submitted.
+- **You choose, and the end is a review.** You pick from the survivors. A cycle is finished when independent gatekeepers pass it, not when an experiment has run.
+
+| | A common pattern | AutoResearchLab |
+|---|---|---|
+| Where the question comes from | A topic is given; an LLM brainstorms ideas | The field is mapped first; candidates come from its beliefs, bottlenecks and blind spots |
+| What the idea generator sees | Often the tools that are available | The field only ("instrument-blind") |
+| How novelty is judged | The model rates its own idea, or embedding similarity | A literature search tries to refute it; ideas that are found are struck |
+| Who ranks the ideas | One model | 4–5 independent reviewers from the field map, scores sealed until all submit |
+| What "feasible" means | The code runs | Named open-source assets, and one published number to reproduce here before the new experiment |
+| Who picks the problem | The system | You, from the survivors |
+| When a result counts | The experiment finished | Independent gatekeepers pass novelty, technical quality and reproducibility |
 
 ## Novelty is built in, not hoped for
 
@@ -15,14 +34,48 @@ A result is interesting when it denies or sharply qualifies an assumption its au
 1. **Field landscape first.** Before any lead exists, scout agents map every subfield the request implies, with its canonical works and its 2024–2026 frontier.
    - Sources: scholarly APIs, forward-citation graphs of the canonical works, and full-text deep reads of the state of the art.
 2. **SOTA cards.** The strongest recent papers are read in depth and condensed into cards: what was claimed, what was measured, and which code, checkpoints and benchmarks they released.
-3. **Field beliefs.** The LabDirector writes down what the field currently takes for granted, with citations.
-4. **A candidate slate, blind to the instruments.** Each candidate problem targets one of those beliefs. Candidates are chosen from the field, not from whatever tools happen to be installed.
-5. **An expert panel.** Four or five independent reviewer agents rank the slate, one for each subfield of the field map (topped up with a methodologist when the map names fewer). A candidate scores by how much its result would change a reviewer's own research, times how uncertain that reviewer is about the outcome, times how sound the reviewer judges it.
-6. **Novelty refutation.** A scout tries to prove that each surviving idea has already been published. Ideas that fall are struck from the slate.
+3. **Field beliefs.** The LabDirector writes down what the field takes for granted, with citations. It also records how mature each subfield is, the bottlenecks everybody names, and the latent signals: what papers work around, assume away or leave unmeasured.
+4. **A candidate slate, blind to the instruments.** Eight to ten candidate problems, spread over at least three subfields and at least three of four origin strategies:
+   - **belief denial:** deny a belief the field holds;
+   - **method leap:** in an immature subfield, a mechanism the field has not tried;
+   - **bottleneck transfer:** a concept from another discipline, or from a natural system, against a bottleneck everybody names;
+   - **latent bottleneck:** a demand nobody has named yet, read off what the papers leave out.
+5. **An expert panel.** Four or five independent reviewer agents rank the slate, one for each subfield of the field map (topped up with a methodologist when the map names fewer).
+6. **Novelty refutation.** A scout tries to prove that each of the panel's top candidates has already been published. Ideas that fall are struck, and the next-ranked candidate takes their place.
 7. **Feasibility, pass or fail.** A candidate must name the open-source assets it builds on. It must also have a *reproduction anchor*: one number from a SOTA paper, reproduced on this machine first.
 8. **Your choice.** The cycle pauses and shows you the survivors. You pick one with `researchlab select`, or you set a timeout and let it proceed on its own.
 
+The panel's score is Davis's criterion written as arithmetic:
+
+```text
+value               = impact × outcome uncertainty × soundness
+outcome uncertainty = 1 − |2p − 1|        p = the reviewer's probability that the hypothesis holds
+```
+
+A reviewer who can call the outcome (p near 0 or 1) is saying the result would not be news. A reviewer whose own research would not change is saying it is not interesting. Either way the value drops. Candidates the panel can predict are flagged `PREDICTABLE`. Strong disagreement is flagged `CONTESTED` and reported, never averaged away.
+
 Novelty is checked again at the end. Independent gatekeepers score novelty, technical quality, reproducibility, clarity and impact. Novelty, technical quality and reproducibility must each clear the bar (one may sit up to ten points below it only when the other two clear it), so a flawless experiment on an incremental idea does not pass.
+
+## What you choose from
+
+At the owner checkpoint, `researchlab candidates` shows each survivor like this. This is an illustrative card: the format is the program's, but the values are invented.
+
+```text
+## 1. `cand_3` -- With equal tuning budgets, gradient-boosted trees match transformer tabular models on medium-sized datasets
+
+- Origin strategy: `belief_denial` -- denies "deep tabular models now outperform tree ensembles" (held by 3 SOTA cards)
+- Prediction that differs: the reported margin falls below 0.5 accuracy points once every model family gets the same number of tuning trials
+- Informative either way: if confirmed -- the published gains are partly a tuning-budget effect; if refuted -- the gain survives a fair protocol
+- Panel: value 0.41 (rank 1); mean P(holds) 0.55, outcome uncertainty 0.88, impact 0.71, soundness 0.66; probability spread 0.30
+  - *subfield_deep_tabular_models*: P(holds) 0.40, impact 0.80, soundness 0.70. The budget gap is real, but recent models tune cheaply. Closest prior work: ...
+  - *methodology*: P(holds) 0.65, impact 0.60, soundness 0.75. Needs a preregistered trial count per family. Closest prior work: ...
+- Novelty audit: partially_anticipated. Closest: Why do tree-based models still outperform deep learning on tabular data? (2022)
+- Open-source assets: code https://github.com/...; dataset https://huggingface.co/datasets/...
+- Reproduction anchor (first, on this host): <paper> -- accuracy = <reported value> (<setup>)
+- Cost: ...
+```
+
+Candidates struck on the way are listed below the survivors, each with its reason: the paper that anticipated it, or the feasibility check it failed.
 
 ## End-to-end research automation
 
@@ -42,7 +95,7 @@ research request (Markdown)
        └─ conclude → conclusion review → paper and figures
 ```
 
-The experiment step covers whatever the design needs, for example a MuJoCo simulation, a dataset fetched from a public registry, or an open-source model installed inside the sandbox.
+The experiment step covers whatever the design needs, for example a MuJoCo simulation, a public benchmark dataset, or an open-source model installed inside the sandbox.
 
 Each step is done by an agent with one role and one task:
 
