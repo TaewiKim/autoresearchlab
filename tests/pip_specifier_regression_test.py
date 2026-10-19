@@ -92,3 +92,19 @@ class TheDualUseGuardIsUnchanged(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ADescribedRuntimeIsReadAsNames(unittest.TestCase):
+    # MEASURED ON cycle-a-20260919, 2026-10-19: handoffs list their
+    # runtime as "pandas 3.0.6"; 804 lane results rejected every entry for its
+    # space, so nothing was ever recognised as present or installed.
+    def test_name_and_version_becomes_the_bare_name(self):
+        allowed, rejected = _filter(["pandas 3.0.6", "scipy v1.17.0", "Python 3.12", "numpy>=1.26"])
+        self.assertEqual(allowed, ["pandas", "scipy", "numpy>=1.26"])
+        self.assertEqual(rejected, [{"input": "Python 3.12", "reason": "interpreter_not_a_package"}])
+
+    def test_a_space_is_still_refused_everywhere_else(self):
+        for hostile in ("numpy --index-url x", "pkg @ https://x", "a b c", "git+https://x y"):
+            allowed, rejected = _filter([hostile])
+            self.assertEqual(allowed, [], hostile)
+            self.assertEqual(len(rejected), 1, hostile)

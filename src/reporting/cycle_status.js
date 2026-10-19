@@ -251,8 +251,41 @@ function gateCheck(root, cycleId) {
   } catch { /* no history */ }
   const review = readJson(path.join(root, "state", `${cycleId}-gate-review.json`)) || {};
   if (!latest) {
-    return check("gate", "the gate", VERDICT.ABSENT, { gate_passed: review.gate_passed ?? null }, historyPath,
-      "no watchdog observation yet");
+    // No watchdog runs here (it is optional: `watch-cycle`). The gate keeps its
+    // own record of every round; read the rounds from it instead of reporting
+    // a cycle with hundreds of reviews as one the gate has not seen.
+    // MEASURED ON cycle-a-20260919, 2026-10-19: 1,763 rounds in
+    // gate-review-history.jsonl, and `status` said "not yet, round ?".
+    const gateHistoryPath = path.join(root, "state", `${cycleId}-gate-review-history.jsonl`);
+    const rounds = [];
+    try {
+      for (const line of fs.readFileSync(gateHistoryPath, "utf8").split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        try {
+          const entry = JSON.parse(line);
+          if (entry.kind === "gate-review") rounds.push(entry);
+        } catch { /* skip a torn line */ }
+      }
+    } catch { /* no gate history either */ }
+    if (!rounds.length) {
+      return check("gate", "the gate", VERDICT.ABSENT, { gate_passed: review.gate_passed ?? null }, gateHistoryPath,
+        "no gate round yet");
+    }
+    const best = {};
+    for (const entry of rounds) {
+      for (const [rubric, score] of Object.entries(entry.rubric || {})) {
+        if (Number.isFinite(score) && !(best[rubric] >= score)) best[rubric] = score;
+      }
+    }
+    const last = rounds[rounds.length - 1];
+    return check("gate", "the gate", VERDICT.OK, {
+      gate_rounds: rounds.length,
+      best_by_rubric: best,
+      distinct_leads: new Set(rounds.map((entry) => entry.subject).filter(Boolean)).size,
+      latest_score: last.score ?? null,
+      gate_passed: review.gate_passed ?? last.pass ?? null,
+      observed_at: last.ts || null,
+    }, gateHistoryPath, null);
   }
   return check("gate", "the gate", latest.gate_rounds > 0 ? VERDICT.OK : VERDICT.ATTENTION, {
     gate_rounds: latest.gate_rounds ?? null,

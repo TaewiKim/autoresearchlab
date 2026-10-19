@@ -47,7 +47,7 @@ const HEADLINE = {
   survey: (d) => `${d.open_problems ?? 0} problems (${d.open_problems_attributed ?? 0} attributed), ${d.proposed_methods ?? 0} methods, ${d.survey_coverage_gaps ?? 0} stated gaps`,
   lead: (d) => `${d.primary_family || "none"} — falsification ${d.falsification_conditions}, rivals ${d.rival_mechanisms}, lit edges ${d.supporting_literature_edges}`,
   experiments: (d) => `${d.lanes_with_measured_output ?? 0} of ${d.runner_lanes ?? 0} runner lanes measured something, ${d.distinct_blueprints ?? 0} distinct blueprint(s)`,
-  gate: (d) => `round ${d.gate_rounds ?? "?"}, best ${JSON.stringify(d.best_by_rubric || {})}`,
+  gate: (d) => `round ${d.gate_rounds ?? "?"}${d.latest_score != null ? `, latest ${d.latest_score}` : ""}${d.gate_passed ? ", PASSED" : ""}, best ${JSON.stringify(d.best_by_rubric || {})}`,
   capability: (d) => `${d.verified ?? 0} verified, ${d.unavailable ?? 0} measured absent${d.implemented_but_not_probed?.length ? `, UNPROBED: ${d.implemented_but_not_probed.join(", ")}` : ""}`,
   delivery: (d) => `${d.signals ?? 0} signals, ${d.produced_and_unread?.length ?? 0} produced and read by nobody`,
 };

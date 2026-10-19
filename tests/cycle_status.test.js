@@ -215,3 +215,22 @@ test("the shape a dashboard reads is stable", () => {
   assert.ok(JSON.parse(JSON.stringify(status)), "the report must survive a JSON round trip");
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test("without a watchdog, the gate's rounds are read from the gate's own history", () => {
+  // MEASURED ON cycle-a-20260919, 2026-10-19: 1,763 gate rounds on
+  // disk, no watchdog running, and the report said the gate had not been seen.
+  const root = emptyCycle();
+  const rows = [
+    { ts: "2026-10-19T10:00:00Z", kind: "gate-review", score: 40, pass: false, subject: "lead a", rubric: { novelty: 30, technical_quality: 50 } },
+    { ts: "2026-10-19T11:00:00Z", kind: "gate-review", score: 43, pass: false, subject: "lead b", rubric: { novelty: 32, technical_quality: 38 } },
+    { ts: "2026-10-19T11:30:00Z", kind: "something-else" },
+  ];
+  fs.writeFileSync(path.join(root, "state", `${CYCLE}-gate-review-history.jsonl`), `${rows.map((row) => JSON.stringify(row)).join("\n")}\n{torn`, "utf8");
+  const gate = cycleStatus({ root, cycleId: CYCLE }).checks.find((item) => item.id === "gate");
+  assert.equal(gate.verdict, VERDICT.OK);
+  assert.equal(gate.detail.gate_rounds, 2);
+  assert.deepEqual(gate.detail.best_by_rubric, { novelty: 32, technical_quality: 50 });
+  assert.equal(gate.detail.distinct_leads, 2);
+  assert.equal(gate.detail.latest_score, 43);
+  fs.rmSync(root, { recursive: true, force: true });
+});

@@ -34,6 +34,14 @@ PIP_INSTALL_MAX_PACKAGES = 10
 PIP_INSTALL_NAME_PATTERN = re.compile(
     r"^[a-zA-Z][a-zA-Z0-9_\-\.]*((==|>=|<=|~=|!=|>|<)[\w\.\-\+]+)?$"
 )
+# "pandas 3.0.6" / "Python 3.12": the runtime a handoff DESCRIBES, written as
+# name and version with a space. MEASURED ON cycle-a-20260919,
+# 2026-10-19: 804 lane results carried such entries, every one rejected for its
+# space, so a package that was missing was never installed and one that was
+# present was never recognised as present. Read as the bare name: present ->
+# already importable; missing -> installed. The interpreter is not a package.
+_DESCRIBED_VERSION = re.compile(r"^([A-Za-z][A-Za-z0-9_\-\.]*)\s+v?(\d[\w\.\-\+]*)$")
+_INTERPRETER_NAMES = {"python", "python3", "cpython"}
 PIP_INSTALL_TIMEOUT_SECONDS = 600
 PIP_IMPORT_NAME_OVERRIDES = {
     "beautifulsoup4": "bs4",
@@ -60,6 +68,12 @@ def _filter_pip_install_request(packages: List[str]) -> tuple[List[str], List[Di
         if not text:
             rejected.append({"input": raw, "reason": "empty_name"})
             continue
+        described = _DESCRIBED_VERSION.fullmatch(text.strip())
+        if described:
+            if described.group(1).lower() in _INTERPRETER_NAMES:
+                rejected.append({"input": text, "reason": "interpreter_not_a_package"})
+                continue
+            text = described.group(1)
         # Reject anything that looks like a URL / git ref / index
         # override — this is the dual-use guard against the analyst
         # turning the install step into arbitrary code execution
