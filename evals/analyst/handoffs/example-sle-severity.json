@@ -1,0 +1,24 @@
+{
+  "_comment": "A recorded analyst handoff to score. In a live eval this is produced by running the analyst agent (Rust runtime) for the case prompt; here it is checked in so the harness is runnable and testable without the runtime.",
+  "primary_hypothesis_id": "HYP-GSE318067-SLE-PROTEIN-SEVERITY-01",
+  "canonical_variable_resolution": [
+    {
+      "concept": "primary_exposure",
+      "resolved_canonical_id": "dataset:somalogic:geo:gse318067",
+      "resolved_accession": "GSE318067",
+      "source_tier": "verified_semantic",
+      "freshness": "2026-06-04T10:00:00Z",
+      "rejected_candidates": [
+        { "candidate": "GSE282742", "reason": "MCI->AD transcriptomics; wrong disease and grain" }
+      ]
+    },
+    {
+      "concept": "outcome",
+      "resolved_canonical_id": "dataset:somalogic:geo:gse318067",
+      "resolved_accession": "GSE318067",
+      "source_tier": "verified_semantic",
+      "freshness": "2026-06-04T10:00:00Z",
+      "rejected_candidates": []
+    }
+  ]
+}

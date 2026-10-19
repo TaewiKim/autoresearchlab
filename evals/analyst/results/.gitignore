@@ -1,0 +1,2 @@
+# Generated eval telemetry — history is local/CI output, not source.
+*.jsonl

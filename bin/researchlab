@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+# `researchlab <command>`: the CLI, from any directory.
+#
+# Cycle state is kept in <repository>/.research-lab, so the CLI always runs
+# from the repository root, whatever the caller's directory.
+set -e
+here=$(dirname "$(readlink -f "$0")")
+root=$(cd "$here/.." && pwd)
+cd "$root"
+exec node "$root/src/cli/index.js" "$@"

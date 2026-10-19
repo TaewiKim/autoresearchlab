@@ -1,0 +1,24 @@
+{
+  "blueprint_id": "who-public-health-long-run-v1",
+  "objective": "Run a sustained multi-agent public-health research cycle over WHO datasets for at least 8 hours.",
+  "minimum_runtime_hours": 8,
+  "orchestration_mode": "asynchronous",
+  "supervision_model": "chronicle-mediated",
+  "agent_count": 13,
+  "agent_mix": {
+    "lab_director": 1,
+    "chronicle": 1,
+    "scout": 2,
+    "analyst": 2,
+    "lab_runner": 4,
+    "illustrator": 1,
+    "author": 2
+  },
+  "core_principles": [
+    "No raw-artifact micromanagement by LabDirector",
+    "Chronicle briefs are the primary supervision interface",
+    "Experiment lanes continue asynchronously between strategy checkpoints",
+    "At least one analysis family must remain active at all times after hour 2",
+    "Long-run execution favors refine over pivot until independent evidence weakens"
+  ]
+}

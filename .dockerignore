@@ -1,0 +1,22 @@
+# Kept out of the image: a native install in the same clone must not carry its
+# state, settings, keys or Codex login into it.
+.research-lab/
+**/.research-lab/
+researchlab.env
+.env
+*.env
+!researchlab.env.example
+secrets/
+*.key
+*.pem
+auth.json
+requests/
+.venv/
+node_modules/
+native/researchlab-harness/target/
+native/researchlab-harness/target-maintainer/
+.maintainer-worktrees/
+__pycache__/
+*.pyc
+.pytest_cache/
+tmp/

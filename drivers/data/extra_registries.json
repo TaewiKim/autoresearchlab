@@ -1,0 +1,24 @@
+[
+  {
+    "name": "pangaea",
+    "search_url": "https://www.pangaea.de/?q={query}&format=json&count={max}",
+    "kind": "json_object",
+    "items_path": "results",
+    "title_field": "name",
+    "url_field": "uri",
+    "doi_field": "doi",
+    "description_field": "description",
+    "publisher": "PANGAEA"
+  },
+  {
+    "name": "mendeley_data",
+    "search_url": "https://data.mendeley.com/public-api/datasets/search?query={query}&page=1&size={max}",
+    "kind": "json_object",
+    "items_path": "results",
+    "title_field": "name",
+    "url_field": "doi.uri",
+    "doi_field": "doi.id",
+    "description_field": "description",
+    "publisher": "Mendeley Data"
+  }
+]

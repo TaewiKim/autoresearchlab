@@ -1,0 +1,45 @@
+{
+  "name": "autoresearchlab",
+  "version": "0.1.0",
+  "description": "Filesystem-backed multi-agent research orchestration with a Rust runtime and Node CLI.",
+  "author": "Taewi Kim",
+  "license": "MIT",
+  "type": "commonjs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TaewiKim/autoresearchlab.git"
+  },
+  "homepage": "https://github.com/TaewiKim/autoresearchlab#readme",
+  "bugs": {
+    "url": "https://github.com/TaewiKim/autoresearchlab/issues"
+  },
+  "bin": {
+    "researchlab": "src/cli/index.js"
+  },
+  "scripts": {
+    "build:native": "node ./scripts/build-native.mjs",
+    "build": "node ./scripts/build-native.mjs",
+    "start": "node ./src/cli/index.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "keywords": [
+    "research",
+    "orchestration",
+    "agents",
+    "rust",
+    "node",
+    "chronicle",
+    "codex"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "main": "src/cli/index.js",
+  "directories": {
+    "doc": "docs",
+    "example": "examples",
+    "lib": "lib",
+    "test": "tests"
+  },
+  "private": true
+}

@@ -1,0 +1,5 @@
+{
+  "_comment": "A recorded analysis-stage response to score. In a live run this is the data-analysis agent's answer to the question over titanic.csv; checked in so the adapter runs without the agent.",
+  "question_id": "example-titanic-fare",
+  "response": "After loading titanic.csv and computing the statistics: the overall mean fare is @mean_fare[34.6542]. For first-class passengers, @mean_fare_class1[87.9610], @median_fare_class1[69.30]."
+}

@@ -1,0 +1,33 @@
+# Cycle state, datasets and outputs: yours, never committed.
+.research-lab/
+**/.research-lab/
+
+# Your research requests (the examples are under examples/).
+requests/
+
+# Settings and keys.
+researchlab.env
+.env
+*.env
+!researchlab.env.example
+secrets/
+*.key
+*.pem
+auth.json
+
+# Build and environment output.
+native/researchlab-harness/target/
+native/researchlab-harness/target-maintainer/
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+tmp/
+.maintainer-worktrees/
+
+# Evaluation results.
+evals/*/results/*.jsonl
+reference/analyst/reference_notes_overlay.proposed.json
+reference/analyst/PATCH_SUMMARY.md
+.DS_Store

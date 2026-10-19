@@ -1,0 +1,8 @@
+{
+  "_comment": "Recorded Chronicle extraction output to score. One triple is missing (genre) and would be a recall miss; the others match. In a live run this is what the KG-construction stage emits for the sentence+ontology.",
+  "id": "ont_music_test_1",
+  "triples": [
+    { "sub": "John Lennon", "rel": "member_of", "obj": "The Beatles" },
+    { "sub": "The Beatles", "rel": "formed_in", "obj": "Liverpool" }
+  ]
+}

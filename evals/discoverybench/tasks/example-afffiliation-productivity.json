@@ -1,0 +1,21 @@
+{
+  "task_id": "example-affiliation-productivity",
+  "domain": "scientometrics",
+  "query": "Using the researchers dataset, characterize how international collaboration relates to research productivity, for which subpopulation and in which direction.",
+  "dataset_metadata": {
+    "name": "researchers.csv",
+    "columns": [
+      { "name": "international_collaboration_share", "description": "fraction of a researcher's papers with an international co-author" },
+      { "name": "annual_publication_count", "description": "publications per year (productivity)" },
+      { "name": "career_stage", "description": "early / mid / senior" }
+    ]
+  },
+  "gold": {
+    "hypothesis": "Among early-career researchers, a higher international collaboration share is positively associated with annual publication count.",
+    "context": "early-career researchers",
+    "variables": ["international_collaboration_share", "annual_publication_count"],
+    "relationship": "positive association (higher collaboration -> higher productivity)"
+  },
+  "thresholds": { "variables": 0.5, "context": 0.3 },
+  "_note": "Domain-general DiscoveryBench-style fixture. In a real run the prediction is the hypothesis the harness derives from the dataset+query; scored via faceted Hypothesis Matching."
+}

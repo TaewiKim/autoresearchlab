@@ -1,0 +1,11 @@
+pandas
+scipy
+statsmodels
+matplotlib
+seaborn
+pyarrow
+openpyxl
+Pillow
+python-pptx
+opentelemetry-api
+opentelemetry-sdk

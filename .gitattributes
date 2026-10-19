@@ -1,0 +1,9 @@
+# Shell scripts and Python drivers run inside the Linux codex-sandbox container.
+# Force LF so a Windows checkout (core.autocrlf=true) doesn't write CRLF, which
+# makes bash fail with `$'\r': command not found` and breaks the watchdog.
+*.sh text eol=lf
+*.py text eol=lf
+*.bash text eol=lf
+# The CLI wrapper (no extension) runs under sh on Linux.
+bin/researchlab text eol=lf
+scripts/public/template/bin/researchlab text eol=lf

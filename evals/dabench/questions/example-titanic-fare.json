@@ -1,0 +1,15 @@
+{
+  "id": "example-titanic-fare",
+  "file_name": "titanic.csv",
+  "question": "Compute the mean fare overall, and the mean and median fare for first-class passengers.",
+  "constraints": "Round all monetary values to two decimal places.",
+  "format": "@mean_fare[value], @mean_fare_class1[value], @median_fare_class1[value]",
+  "level": "medium",
+  "concepts": ["Summary Statistics"],
+  "labels": [
+    { "name": "mean_fare", "value": 34.65, "decimals": 2 },
+    { "name": "mean_fare_class1", "value": 87.96, "decimals": 2 },
+    { "name": "median_fare_class1", "value": 69.30, "decimals": 2 }
+  ],
+  "_note": "DABench-style closed-form question. In a real run the response is the analysis stage's answer; checked in so the adapter is runnable/testable. Replace labels/files with the real allenai-equivalent InfiAgent DAEval set under questions/ + data/."
+}

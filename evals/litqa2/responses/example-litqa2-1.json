@@ -1,0 +1,6 @@
+{
+  "_comment": "Recorded Scout answer to score: selected option A (0.72) and retrieved the source paper. In a live run this is Scout's MC choice + retrieved DOIs after literature search.",
+  "id": "example-litqa2-1",
+  "answer": "A",
+  "retrieved_dois": ["10.1000/example.2024.0001"]
+}

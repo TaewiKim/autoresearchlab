@@ -1,0 +1,10 @@
+{
+  "id": "ont_music_test_1",
+  "ontology": "music",
+  "sent": "John Lennon was a member of The Beatles, a rock band formed in Liverpool.",
+  "triples": [
+    { "sub": "John Lennon", "rel": "member_of", "obj": "The Beatles" },
+    { "sub": "The Beatles", "rel": "genre", "obj": "rock" },
+    { "sub": "The Beatles", "rel": "formed_in", "obj": "Liverpool" }
+  ]
+}

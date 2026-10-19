@@ -1,0 +1,13 @@
+{
+  "id": "example-litqa2-1",
+  "question": "In the 2024 cohort study of drug X for condition Y, what was the reported hazard ratio for the primary endpoint?",
+  "options": [
+    "0.72",
+    "1.00",
+    "1.35",
+    "Insufficient information to answer"
+  ],
+  "answer_index": 0,
+  "source_doi": "10.1000/example.2024.0001",
+  "_note": "LitQA2-style MC over recent literature with an abstention option. In a real run the response is Scout's answer after retrieval. Replace with the real LitQA2 set (FutureHouse / LAB-Bench)."
+}

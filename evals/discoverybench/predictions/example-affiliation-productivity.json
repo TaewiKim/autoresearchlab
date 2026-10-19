@@ -1,0 +1,5 @@
+{
+  "_comment": "A recorded harness-derived hypothesis to score. In a live run this is the promoted hypothesis the cycle produces for the task's query+dataset; checked in so the adapter is runnable/testable without a cycle.",
+  "task_id": "example-affiliation-productivity",
+  "hypothesis": "For early-career researchers, an increase in international_collaboration_share is positively associated with a higher annual_publication_count, indicating that early international collaboration raises productivity."
+}

@@ -1,0 +1,6 @@
+{
+  "_note": "Pre-parsed ontology (the real Text2KGBench ships .ttl; convert to this shape). Concepts/relations from a small music ontology.",
+  "name": "music",
+  "concepts": ["Band", "Person", "Genre", "Album", "City"],
+  "relations": ["member_of", "genre", "formed_in", "released_by"]
+}

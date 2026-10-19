@@ -1,0 +1,29 @@
+{
+  "case_id": "example-sle-severity",
+  "domain": "omics-proteomics",
+  "prompt": "Validate the SLE peripheral-blood proteomic severity-gradient hypothesis",
+  "pinned": {
+    "snapshot_id": "example",
+    "note": "Ground truth pinned to a data-graph snapshot. Regenerate expected_resolutions only when the snapshot is intentionally rolled forward."
+  },
+  "ground_truth": {
+    "expected_resolutions": [
+      {
+        "concept": "primary_exposure",
+        "expected_accession": "GSE318067",
+        "expected_canonical_id": "dataset:somalogic:geo:gse318067",
+        "expected_tier": "verified_semantic"
+      },
+      {
+        "concept": "outcome",
+        "expected_accession": "GSE318067",
+        "expected_canonical_id": "dataset:somalogic:geo:gse318067",
+        "expected_tier": "verified_semantic"
+      }
+    ]
+  },
+  "thresholds": {
+    "accuracy_threshold": 0.9,
+    "resolution_rate_target": 1.0
+  }
+}
