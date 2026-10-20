@@ -431,9 +431,11 @@ function leadProtectionPrefix(leadSupersession) {
       "Nothing about it failed; the cycle simply stopped working on it, and every round since has " +
       "started a new hypothesis from scratch. BEFORE proposing any new lead, say what this one still " +
       "needs — the specific experiment or evidence that would raise its weakest rubric — and prefer " +
-      "resuming it. Replace it only if you can name the reason it cannot reach the gate, and put that " +
-      "reason in your rationale. Starting a further new lead without addressing this one is the churn " +
-      "that has kept every lead at about two rounds of work. "
+      "resuming it. Replace it only if you can name the reason it cannot reach the gate. Answer in " +
+      `\`resume_lead_decision\`: {"lead_id": "${resume.memory_id}", "decision": "resume" or "decline", ` +
+      '"reason": "...", "evidence_refs": ["the lanes or artifacts that show it"]}. A decline with its ' +
+      "reason is recorded and this lead is not put to you again. Starting a further new lead without " +
+      "addressing this one is the churn that has kept every lead at about two rounds of work. "
     );
   }
   // MEASURED ON cycle-a-20260919, 2026-10-03: the ledger correctly

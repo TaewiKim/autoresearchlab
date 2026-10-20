@@ -628,11 +628,15 @@ function rollupByHypothesis(records, cycleId) {
 // The best-so-far ACTIVE lead is the critical memory. It is the non-superseded
 // hypothesis with the highest best_composite (ties broken by most rounds of
 // sustained work).
-function bestSoFarLead(records, cycleId) {
+// `declined`: leads the director was asked to resume and declined with a reason
+// (directorResumeDeclines). They are no longer "the best lead to protect": the
+// question was put and answered, so the guard ranks the leads still in play.
+function bestSoFarLead(records, cycleId, declined = null) {
   const roll = rollupByHypothesis(records, cycleId);
   let best = null;
   for (const cur of roll.values()) {
     if (cur.superseded || cur.banked) continue;
+    if (declined && declinedResumeFor(declined, cur.memory_id)) continue;
     if (
       !best ||
       cur.best_composite > best.best_composite ||
@@ -1011,6 +1015,70 @@ function asArrayLike(value) {
   return Array.isArray(value) ? value : [];
 }
 
+// The director's answers to "resume the strongest lead".
+//
+// MEASURED ON cycle-a-20260919, 2026-10-19: the best-scoring lead
+// (hyp:74b518f1105b020b) was dormant, so every pivot decision carried "resume
+// it" into the director's prompt. Its data were confirmed unobtainable and its
+// one bound execution failed the preregistered balance gate, so no estimate
+// existed. Seven of the last 40 director lanes said exactly that and chose
+// another lead. The guard kept no record of the answer, asked again, and the
+// lead changed eight times in a day on that branch alone. A decline with a
+// reason is an answer: it is recorded, and the lead stops being the one the
+// guard protects. A resume needs no record; the director simply selects it.
+const MIN_DECLINE_REASON_CHARS = 40;
+
+function normalizedLeadId(id) {
+  return String(id || "").trim().toLowerCase();
+}
+
+function declinedResumeFor(declined, memoryId) {
+  if (!declined || !memoryId) return null;
+  const key = normalizedLeadId(memoryId);
+  if (declined instanceof Map) return declined.get(key) || null;
+  return declined[key] || null;
+}
+
+function withoutLead(declined, memoryId) {
+  if (!declined || !memoryId) return declined;
+  const copy = new Map(declined instanceof Map ? declined : Object.entries(declined));
+  copy.delete(normalizedLeadId(memoryId));
+  return copy;
+}
+
+function directorResumeDeclines({ root, cycleId }) {
+  const declines = new Map();
+  const lanesDir = path.join(root, "lanes", cycleId);
+  let entries = [];
+  try {
+    entries = fs.readdirSync(lanesDir).filter((name) => name.includes("lab-director"));
+  } catch {
+    return declines;
+  }
+  for (const laneId of entries) {
+    const resultPath = path.join(lanesDir, laneId, "result.json");
+    let extracted = null;
+    try {
+      extracted = JSON.parse(fs.readFileSync(resultPath, "utf8"))?.extracted_json || null;
+    } catch {
+      continue;
+    }
+    const answer = extracted?.resume_lead_decision;
+    if (!answer || typeof answer !== "object") continue;
+    const verdict = String(answer.decision || "").trim().toLowerCase();
+    const reason = String(answer.reason || "").trim();
+    const leadId = normalizedLeadId(answer.lead_id);
+    if (verdict !== "decline" || !leadId || reason.length < MIN_DECLINE_REASON_CHARS) continue;
+    declines.set(leadId, {
+      lead_id: leadId,
+      lane_id: laneId,
+      reason: reason.slice(0, 600),
+      evidence_refs: Array.isArray(answer.evidence_refs) ? answer.evidence_refs.slice(0, 10).map(String) : [],
+    });
+  }
+  return declines;
+}
+
 // How many gate rounds a lead has held, from the append-only ledger.
 function leadRoundsHeld(records, cycleId, leadKey) {
   if (!leadKey) return 0;
@@ -1155,6 +1223,9 @@ function evaluateLeadSupersession({
   // cannot deadlock a cycle the way v82 did when the director was told to cite
   // something that did not exist.
   ignoredExperimentRequests = [],
+  // Dormant best leads the director was told to resume and declined, with a
+  // reason, in `resume_lead_decision` (directorResumeDeclines). Empty by default.
+  declinedResumes = null,
 }) {
   // A director that will not answer the author's request does not get to change
   // the subject. The author asked for the run that would settle a claim the
@@ -1275,7 +1346,9 @@ function evaluateLeadSupersession({
       };
     }
   }
-  const lead = bestSoFarLead(records, cycleId);
+  // A declined lead the director has since selected again is the current lead,
+  // and is protected like any other.
+  const lead = bestSoFarLead(records, cycleId, withoutLead(declinedResumes, currentLeadKey));
   if (!lead) {
     return { decision: "allow", reason: "no_active_lead_to_protect", lead: null };
   }
@@ -1539,6 +1612,7 @@ module.exports = {
   leadStallKind,
   churnCost,
   evaluateLeadSupersession,
+  directorResumeDeclines,
   validationDeclaresFalsification,
   leadRoundsHeld,
   MIN_LEAD_ROUNDS,

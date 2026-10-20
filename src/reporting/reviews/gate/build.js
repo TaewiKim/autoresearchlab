@@ -629,6 +629,9 @@ function buildGateReview({
               // to answer. Keeping it at the call site is also what stops this
               // from deadlocking a cycle the way v82 did.
               ignoredExperimentRequests: unansweredExperimentRequests({ root, cycleId, minIgnored: 3 }),
+              // Dormant best leads the director has already declined to resume,
+              // with a reason: asked and answered, so not asked again.
+              declinedResumes: hypothesisProgress.directorResumeDeclines({ root, cycleId }),
               // The director's own replacement record for this proposal. Supplying
               // it is what turns the method floor from a contract sentence into a
               // condition: a replacement that names no research question cannot

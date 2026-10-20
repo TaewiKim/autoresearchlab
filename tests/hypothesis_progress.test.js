@@ -273,6 +273,61 @@ function rec({ round, lane, statement, scores, verdict, gatePassed }) {
   pass("stalled by absence: a dormant lead stops blocking pivots, and is handed back");
 }
 
+// ---- A declined resume is an answer -------------------------------------------
+// cycle-a-20260919, 2026-10-19: the dormant best lead's data were
+// confirmed unobtainable; seven director lanes said so and chose another lead,
+// and the guard put the same lead to the next director every time.
+{
+  const fsx = require("fs");
+  const os = require("os");
+  const pathx = require("path");
+  const { directorResumeDeclines } = require("../src/reporting/hypothesis_progress");
+  const records = [];
+  for (const round of [1, 2]) {
+    records.push(rec({
+      round, lane: `gatekeeper-0${round}`, statement: "the abandoned lead",
+      scores: { novelty: 40, technical_quality: 30, reproducibility: 20 }, verdict: "challenge",
+    }));
+  }
+  for (let round = 3; round <= 43; round += 1) {
+    records.push(rec({
+      round, lane: `gatekeeper-${round}`, statement: `replacement hypothesis ${round}`,
+      scores: { novelty: 30, technical_quality: 20, reproducibility: 10 }, verdict: "challenge",
+    }));
+  }
+  const dormant = bestSoFarLead(records, CYCLE);
+
+  const root = fsx.mkdtempSync(pathx.join(os.tmpdir(), "declines-"));
+  const writeDirector = (laneId, answer) => {
+    const dir = pathx.join(root, "lanes", CYCLE, laneId);
+    fsx.mkdirSync(dir, { recursive: true });
+    fsx.writeFileSync(pathx.join(dir, "result.json"), JSON.stringify({ extracted_json: { resume_lead_decision: answer } }));
+  };
+  // Too thin to be a reason; and a resume is not a decline.
+  writeDirector("followup-lab-director-1", { lead_id: dormant.memory_id, decision: "decline", reason: "no", evidence_refs: [] });
+  writeDirector("followup-lab-director-2", { lead_id: dormant.memory_id, decision: "resume", reason: "it needs the balanced panel rerun at r020 first", evidence_refs: [] });
+  assert.strictEqual(directorResumeDeclines({ root, cycleId: CYCLE }).size, 0, "only a reasoned decline counts");
+  writeDirector("followup-lab-director-3", {
+    lead_id: dormant.memory_id.toUpperCase(), decision: "decline",
+    reason: "its accession is confirmed unobtainable and the one bound run failed the preregistered balance gate",
+    evidence_refs: ["followup-runner-526"],
+  });
+  const declines = directorResumeDeclines({ root, cycleId: CYCLE });
+  assert.strictEqual(declines.size, 1);
+
+  const before = evaluateLeadSupersession({ records, cycleId: CYCLE, stallRounds: STALL_ROUNDS });
+  assert.strictEqual(before.reason, "best_lead_dormant_resume_before_replacing", "without the answer it is put again");
+  const after = evaluateLeadSupersession({ records, cycleId: CYCLE, stallRounds: STALL_ROUNDS, declinedResumes: declines });
+  assert.notStrictEqual(after.lead, dormant.memory_id, "the declined lead is no longer the one the guard protects");
+  assert.ok(!after.resume_lead || after.resume_lead.memory_id !== dormant.memory_id, "and it is not put to the director again");
+  // Selected again, it is the current lead and protected like any other.
+  const reselected = evaluateLeadSupersession({
+    records, cycleId: CYCLE, stallRounds: STALL_ROUNDS, declinedResumes: declines, currentLeadKey: dormant.memory_id,
+  });
+  assert.strictEqual(reselected.lead, dormant.memory_id);
+  pass("a reasoned decline to resume the strongest lead is recorded and not asked again");
+}
+
 // ---- ...unless the ledger already recorded that it was falsified -------------
 // cycle-g-v91: hyp:4fafb0af6dd99ba4 was released 31 times by
 // lead_falsified_by_completed_run, went dormant when the cycle moved to a new

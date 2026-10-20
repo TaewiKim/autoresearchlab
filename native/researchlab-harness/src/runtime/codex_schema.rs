@@ -202,6 +202,7 @@ pub(crate) fn codex_output_schema(role: &str, action_type: &str) -> Option<Value
                 "gate_blocker_review_requests",
                 "next_actions",
                 "experiment_request_decisions",
+                "resume_lead_decision",
                 "research_problem",
                 "selected_hypothesis",
                 "chronicle_requests",
@@ -287,6 +288,21 @@ pub(crate) fn codex_output_schema(role: &str, action_type: &str) -> Option<Value
                         "required": ["claim_it_would_support", "decision", "reason"],
                         "additionalProperties": false
                     }
+                },
+                // The answer to "resume the strongest lead" (a dormant best lead
+                // the pivot guard names). A decline with its reason is recorded
+                // (src/reporting/hypothesis_progress.js directorResumeDeclines) so
+                // the same lead is not put to the director again.
+                "resume_lead_decision": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "lead_id": { "type": "string" },
+                        "decision": { "type": "string", "enum": ["resume", "decline"] },
+                        "reason": { "type": "string" },
+                        "evidence_refs": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "required": ["lead_id", "decision", "reason", "evidence_refs"],
+                    "additionalProperties": false
                 },
                 "research_problem": {
                     "type": ["object", "null"],
