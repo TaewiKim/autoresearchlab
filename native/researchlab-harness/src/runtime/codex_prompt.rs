@@ -407,6 +407,14 @@ pub(crate) const ENGINEER_OUTPUT_CONTRACT: &str = "\n\nOutput Contract:\nReturn 
 /// Python/pip and `git -c http.sslBackend=openssl` reached the same hosts.
 pub(crate) const ENGINEER_INSTALL_CLAUSE: &str = "\nINSTALLS (MANDATORY): install only into an isolated per-cycle environment (a venv/conda env or tool cache under .research-lab/envs/<cycle_id>/, or D:/envs/<cycle_id>-<name> where the sandbox can write) - never into a system or shared interpreter, and never modify the local reference repositories: install one editable into the cycle env, or copy it. Prefer the official registry or the project's own repository (PyPI, npm, crates.io, Maven Central, GitHub/GitLab, Hugging Face, NVIDIA/Meta/Google distribution hosts) and respect each licence. Record every install in the lane's provisioning record (`provisioned[*]` and the engineering-capability jsonl): package, version, source URL, and hash where the tool gives one, plus the resolved set (`pip freeze`, the conda export, or the lockfile). Never pass, embed or request credentials or tokens. Only the hosts of this lane's network profile are reachable (invocation.json `permission_profile`); a refused host is a capability blocker, not a reason to find another route. In the Windows sandbox use Python/pip for downloads and `git -c http.sslBackend=openssl` for git; curl.exe and git's default TLS backend fail there.";
 
+// MEASURED 2026-10-21: the host (15.6 GB RAM, shared with other work) froze on
+// virtual-memory exhaustion four times in two days, and the cycle's VM was cut
+// from 8 GB to 6 GB. An engineer that sizes a 32-run training sweep to the
+// machine it imagines takes the whole host down with it; one that measures
+// the memory it has and fits the job to it does not.
+pub(crate) const ENGINEER_MEMORY_CLAUSE: &str = "
+MEMORY (MANDATORY; this machine is small and shared): before any training run, simulation sweep or large data load, measure what you actually have -- `MemAvailable` in /proc/meminfo, and the cgroup limit when `/sys/fs/cgroup/memory.max` holds a number (that number minus `memory.current`; take the smaller), plus `nproc` -- and fit the job to it with headroom: plan for a peak of at most 70% of that. The means are yours: batch size, number of parallel workers or environments, seeds run one after another instead of side by side, data streamed or memory-mapped instead of loaded whole, float32 instead of float64, one process per run so its memory is returned when it ends. Measure the peak of a short pilot first (`resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss` after the child exits, in KiB on Linux; `/usr/bin/time -v` where it is installed) and extrapolate before launching the full job. Write each run's outputs and checkpoints as it finishes, so an interrupted sweep resumes from the last finished run instead of starting over. A run killed for memory (exit 137, `MemoryError`, `Killed`) is a means problem: shrink it and run again; it becomes a blocker only after the smallest faithful configuration has also failed, with the measurements. Record the memory you measured, the pilot's peak and the settings you chose in `runner_invocation_contract.notes` and in the capability record, so the next lane starts from them.";
+
 pub(crate) const GATEKEEPER_FIGURE_VERIFICATION_CLAUSE: &str = "\n\nFIGURE VERIFICATION (MANDATORY FOR THIS REVIEW). You are not scoring the manuscript here. For each figure named in the role plan, OPEN the image and read every assertion it makes in pixels - panel titles, annotations, reference lines, axis ranges, and the relative position of marks - then open its source artifact and check each assertion against the numbers. Two shapes of error have reached a manuscript in this project and you are looking for both: a panel title that the panel's own marks refute, such as naming two arms as clearing a threshold the same chart draws four bars past; and an offset that separates values the artifact records as EQUAL, such as adding plus and minus a constant to two measurements of zero on an axis zoomed to a tenth of a unit, in the figure whose claim is that they coincide.\n\nAn assertion the artifact does not support is a discrepancy even when the caption is correct, because a reader takes the drawing as the finding. A figure you could not open is not verified. Report per figure:\n{\"figure_id\": \"...\", \"verified\": true|false, \"checked_against\": \"artifact path and the columns you read\", \"on_image_assertions\": [\"each claim the image makes\"], \"discrepancies\": [\"each assertion the artifact does not support\"]}\n\n`verified` is true only when every on-image assertion is supported. Leaving `checked_against` empty makes the verdict an opinion and it will not clear the figure.";
 
 pub(crate) const ABSTRACT_SCREENING_POLICY: &str = "\n\nLITERATURE SCREENING POLICY (MANDATORY, UNIVERSAL). For any literature search, create a pending abstract-review queue before admission. The lane that ran the search -- a scout, or a gatekeeper checking prior art -- must read the FULL abstract of each candidate it relies on and emit review JSON matching `queue.review_contract`, then finalize with `--finalize-review-dir <lane_dir> --reviews-file <file>`. Only a review with exact objective and abstract hashes, route-relevant evidence, and sufficient quality may enter a hypothesis or graph. Missing abstract, missing review, hash mismatch, or failed quality remains pending or excluded. Never refill a minimum paper count and never use a legacy title-only corpus. Keep recent (<=3 years) work in a separate track from established cited/verified venue-impact work. Older Scout or Chronicle instructions defer to this policy.";
@@ -728,9 +736,9 @@ pub(crate) fn build_codex_prompt(
         ""
     };
     let engineer_install_clause = if contract.role == "engineer" {
-        ENGINEER_INSTALL_CLAUSE
+        format!("{ENGINEER_INSTALL_CLAUSE}{ENGINEER_MEMORY_CLAUSE}")
     } else {
-        ""
+        String::new()
     };
 
     let scout_review_protocol = format!(
@@ -1330,12 +1338,14 @@ mod prompt_dedupe_tests {
         let plan = json!({"action_type": "capability_provisioning_followup"});
         let prompt = build_codex_prompt(&contract_for("engineer"), Some(&plan)).unwrap();
         assert!(prompt.contains(ENGINEER_INSTALL_CLAUSE));
-        for rule in ["isolated per-cycle environment", "never modify the local reference repositories", "pip freeze", "Never pass, embed or request credentials", "http.sslBackend=openssl"] {
+        assert!(prompt.contains(ENGINEER_MEMORY_CLAUSE));
+        for rule in ["MemAvailable", "at most 70%", "exit 137", "resumes from the last finished run", "isolated per-cycle environment", "never modify the local reference repositories", "pip freeze", "Never pass, embed or request credentials", "http.sslBackend=openssl"] {
             assert!(prompt.contains(rule), "{rule}");
         }
         for role in ["analyst", "scout", "lab-runner"] {
             let prompt = build_codex_prompt(&contract_for(role), Some(&plan)).unwrap();
             assert!(!prompt.contains("INSTALLS (MANDATORY)"), "{role}");
+            assert!(!prompt.contains("MEMORY (MANDATORY"), "{role}");
         }
     }
 
