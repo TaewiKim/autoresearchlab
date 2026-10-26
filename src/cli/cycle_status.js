@@ -49,6 +49,11 @@ const HEADLINE = {
   experiments: (d) => `${d.lanes_with_measured_output ?? 0} of ${d.runner_lanes ?? 0} runner lanes measured something, ${d.distinct_blueprints ?? 0} distinct blueprint(s)`,
   gate: (d) => `round ${d.gate_rounds ?? "?"}${d.latest_score != null ? `, latest ${d.latest_score}` : ""}${d.gate_passed ? ", PASSED" : ""}, best ${JSON.stringify(d.best_by_rubric || {})}`,
   capability: (d) => `${d.verified ?? 0} verified, ${d.unavailable ?? 0} measured absent${d.implemented_but_not_probed?.length ? `, UNPROBED: ${d.implemented_but_not_probed.join(", ")}` : ""}`,
+  tokens: (d) => {
+    const m = (n) => (n == null ? "?" : n >= 1e9 ? `${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(0)}k` : String(n));
+    const roles = (d.top_roles || []).map((r) => `${r.role} ${m(r.counted_tokens)}`).join(", ");
+    return `${m(d.counted_tokens)} counted (${m(d.billed_input_tokens)} input + ${m(d.output_tokens)} output) over ${d.turns} turns; last hour ${m(d.counted_last_hour)}, last 24h ${m(d.counted_last_24h)}${roles ? `; most: ${roles}` : ""}${d.token_budget ? `; ${Math.round((d.token_fraction || 0) * 100)}% of budget` : ""}`;
+  },
   delivery: (d) => `${d.signals ?? 0} signals, ${d.produced_and_unread?.length ?? 0} produced and read by nobody`,
 };
 

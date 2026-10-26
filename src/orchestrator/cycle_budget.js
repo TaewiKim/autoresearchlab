@@ -267,8 +267,10 @@ function budgetLimits(env = process.env) {
   };
 }
 
-function budgetPath({ cwd, cycleId }) {
-  return path.join(cwd, ".research-lab", "state", `${cycleId}-budget.json`);
+// `root` is the .research-lab directory itself, for a caller (status) that is
+// given that and not the directory above it.
+function budgetPath({ cwd, cycleId, root = null }) {
+  return path.join(root || path.join(cwd, ".research-lab"), "state", `${cycleId}-budget.json`);
 }
 
 function fractionOf(used, limit) {
@@ -285,13 +287,13 @@ function fractionOf(used, limit) {
  * caller passes the progress model's history so a lane can be attributed to the
  * stage it was dispatched against rather than to the stage the cycle is in now.
  */
-function updateBudget({ cwd, cycleId, env = process.env, now = Date.now(), milestoneOf = null, maintainerRuns = null }) {
-  const filePath = budgetPath({ cwd, cycleId });
+function updateBudget({ cwd, cycleId, env = process.env, now = Date.now(), milestoneOf = null, maintainerRuns = null, root: rootOverride = null }) {
+  const filePath = budgetPath({ cwd, cycleId, root: rootOverride });
   const previous = readJsonOrNull(filePath) || {};
   const cursors = (previous.cursors && typeof previous.cursors === "object") ? { ...previous.cursors } : {};
   const byLane = (previous.by_lane && typeof previous.by_lane === "object") ? { ...previous.by_lane } : {};
 
-  const root = path.join(cwd, ".research-lab");
+  const root = rootOverride || path.join(cwd, ".research-lab");
   const lanesDir = path.join(root, "lanes", cycleId);
   const sources = [];
   let entries = [];

@@ -339,6 +339,53 @@ function deliveryCheck(root, cycleId) {
  * finding things, is it admitting them, does it have a claim, is it measuring,
  * is the gate moving, can the roles hear each other.
  */
+// What the cycle has spent. The budget file is refreshed by the maintainer's
+// pass, which runs only between run-plans; a run-plan can last hours, and the
+// file then reads as hours old while lanes are spending. Reading the lanes'
+// usage events here is incremental (a cursor per lane) and idempotent, so the
+// report is current whenever it is asked for.
+// MEASURED ON cycle-a-20260919, 2026-10-26: budget.json was two hours
+// stale with a lane starting every few seconds, and nothing displayed tokens.
+function tokensCheck(root, cycleId) {
+  const { updateBudget, budgetPath } = require("../orchestrator/cycle_budget");
+  const file = budgetPath({ root, cycleId });
+  let report = null;
+  try {
+    report = updateBudget({ root, cycleId, env: process.env }).report;
+  } catch { /* fall back to what is on disk */ }
+  report = report || readJson(file);
+  if (!report || !report.totals || !(report.totals.turns > 0)) {
+    return check("tokens", "token usage", VERDICT.ABSENT, {}, file, "no turn.completed usage events in any lane yet");
+  }
+  const now = Date.now();
+  const windows = { last_hour: 3600000, last_24h: 86400000 };
+  const recent = { last_hour: 0, last_24h: 0 };
+  for (const lane of Object.values(report.by_lane || {})) {
+    const endMs = lane.ended_at ? Date.parse(lane.ended_at) : (lane.running ? now : 0);
+    if (!endMs) continue;
+    for (const [name, span] of Object.entries(windows)) if (now - endMs <= span) recent[name] += Number(lane.counted_tokens || 0);
+  }
+  const limits = report.limits || {};
+  const state = report.status || {};
+  const heavy = Object.entries(report.by_role || {})
+    .map(([role, value]) => [role, Number(value.counted_tokens || 0)])
+    .sort((a, b) => b[1] - a[1]).slice(0, 3);
+  return check("tokens", "token usage", state.warned || state.exhausted ? VERDICT.ATTENTION : VERDICT.OK, {
+    counted_tokens: report.totals.counted_tokens ?? null,
+    billed_input_tokens: report.totals.billed_input_tokens ?? null,
+    cached_input_tokens: report.totals.cached_input_tokens ?? null,
+    output_tokens: report.totals.output_tokens ?? null,
+    turns: report.totals.turns,
+    lanes_measured: report.lanes_measured ?? null,
+    counted_last_hour: recent.last_hour,
+    counted_last_24h: recent.last_24h,
+    top_roles: heavy.map(([role, tokens]) => ({ role, counted_tokens: tokens })),
+    token_budget: limits.token_budget ?? null,
+    token_fraction: state.token_fraction ?? null,
+    updated_at: report.updated_at || null,
+  }, file, state.exhausted ? "the token budget is spent" : state.warned ? "80% or more of the token budget" : null);
+}
+
 function cycleStatus({ root, cycleId }) {
   const checks = [
     runCheck(root, cycleId),
@@ -351,6 +398,7 @@ function cycleStatus({ root, cycleId }) {
     gateCheck(root, cycleId),
     capabilityCheck(root, cycleId),
     deliveryCheck(root, cycleId),
+    tokensCheck(root, cycleId),
   ];
   return {
     schema: "researchlab.cycle_status.v1",

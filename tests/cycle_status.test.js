@@ -210,7 +210,7 @@ test("the shape a dashboard reads is stable", () => {
   // Ids are the dashboard's keys; renaming one silently moves a panel.
   assert.deepEqual(
     status.checks.map((item) => item.id),
-    ["run", "retrieval", "corpus", "graph", "survey", "lead", "experiments", "gate", "capability", "delivery"],
+    ["run", "retrieval", "corpus", "graph", "survey", "lead", "experiments", "gate", "capability", "delivery", "tokens"],
   );
   assert.ok(JSON.parse(JSON.stringify(status)), "the report must survive a JSON round trip");
   fs.rmSync(root, { recursive: true, force: true });
@@ -232,5 +232,47 @@ test("without a watchdog, the gate's rounds are read from the gate's own history
   assert.deepEqual(gate.detail.best_by_rubric, { novelty: 32, technical_quality: 50 });
   assert.equal(gate.detail.distinct_leads, 2);
   assert.equal(gate.detail.latest_score, 43);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("token usage is read from the lanes' own usage events, current whenever asked", () => {
+  // MEASURED ON cycle-a-20260919, 2026-10-26: the budget file was
+  // refreshed only by the maintainer's pass, two hours old while lanes spent,
+  // and nothing displayed tokens at all.
+  const root = emptyCycle();
+  const lane = (id, usage, spawnedAt, endedAt) => {
+    const dir = path.join(root, "lanes", CYCLE, id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "stdout.log"), `${JSON.stringify({ type: "turn.completed", usage })}\n`);
+    fs.writeFileSync(path.join(dir, "final-status.json"), JSON.stringify({ completed_at: endedAt }));
+    fs.writeFileSync(path.join(dir, "events.jsonl"), [
+      JSON.stringify({ event_type: "lane_spawned", ts: spawnedAt }),
+      JSON.stringify({ event_type: "lane_completed", ts: endedAt }),
+    ].join("\n"));
+  };
+  const hourAgo = new Date(Date.now() - 20 * 60000).toISOString(); // 20 minutes ago: inside the last hour
+  const earlier = new Date(Date.now() - 30 * 3600000).toISOString();
+  lane("followup-scout-01", { input_tokens: 1000, cached_input_tokens: 400, output_tokens: 100 }, earlier, earlier);
+  lane("followup-scout-02", { input_tokens: 5000, cached_input_tokens: 4000, output_tokens: 500 }, hourAgo, hourAgo);
+  const tokens = cycleStatus({ root, cycleId: CYCLE }).checks.find((item) => item.id === "tokens");
+  assert.equal(tokens.verdict, VERDICT.OK);
+  // counted = (input - cached) + output
+  assert.equal(tokens.detail.counted_tokens, (1000 - 400 + 100) + (5000 - 4000 + 500));
+  assert.equal(tokens.detail.turns, 2);
+  assert.equal(tokens.detail.counted_last_hour, 1500);
+  assert.equal(tokens.detail.counted_last_24h, 1500);
+  // A new turn appended later is picked up on the next ask, without a maintainer pass.
+  fs.appendFileSync(path.join(root, "lanes", CYCLE, "followup-scout-02", "stdout.log"),
+    `${JSON.stringify({ type: "turn.completed", usage: { input_tokens: 300, cached_input_tokens: 0, output_tokens: 50 } })}\n`);
+  const again = cycleStatus({ root, cycleId: CYCLE }).checks.find((item) => item.id === "tokens");
+  assert.equal(again.detail.turns, 3);
+  assert.equal(again.detail.counted_tokens, 700 + 1500 + 350);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("a cycle with no usage events reports tokens as not-yet, and does not throw", () => {
+  const root = emptyCycle();
+  const tokens = cycleStatus({ root, cycleId: CYCLE }).checks.find((item) => item.id === "tokens");
+  assert.equal(tokens.verdict, VERDICT.ABSENT);
   fs.rmSync(root, { recursive: true, force: true });
 });
