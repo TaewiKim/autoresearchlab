@@ -162,6 +162,43 @@ test("one pending analyst receives the measured current-contract execution failu
     {lane_id:"followup-analyst-940",status:"pending"}]});
   assert.deepEqual(repairQueuedAnalystContracts({cwd:f.cwd,cycleId:"c"}),[]);
 });
+test("a preflight-blocked runner routes its failure to one pending analyst",()=>{
+  // MEASURED ON cycle-a-20260919, 2026-10-26: runners 745-747
+  // recorded executed_dataset_hash_mismatch only in analysis-contract-preflight.json;
+  // without result.json, all already-bound pending Analysts missed regeneration.
+  const f=fixture(),c=currentAnalysisContract(f.root,"c");
+  const runner=path.join(f.root,"lanes","c","followup-runner-747");
+  const handoff=path.join(f.root,"lanes","c","followup-analyst-1284","handoff-validation-plan.json");
+  f.write(path.join(runner,"lane-contract.json"),{role:"lab-runner"});
+  f.write(path.join(runner,"role-plan.json"),{role:"lab-runner",planner_metadata:{analyst_handoff_path:handoff}});
+  f.write(path.join(runner,"analysis-contract-preflight.json"),{
+    contract_id:c.contract_id,status:"blocked",evidence_role:"primary",problems:["executed_dataset_hash_mismatch"]});
+  f.write(path.join(runner,"final-status.json"),{status:"failed",completed_at:"2026-10-26T11:11:42Z"});
+  for(const id of ["1286","1288"]){
+    const dir=path.join(f.root,"lanes","c",`followup-analyst-${id}`);
+    f.write(path.join(dir,"lane-contract.json"),{role:"analyst"});
+    const plan={role:"analyst",action_type:id==="1286"?"methods_followup":"gate_restart_followup",planner_metadata:{}};
+    bindAnalystPlan(plan,c);
+    f.write(path.join(dir,"role-plan.json"),plan);
+  }
+  f.write(path.join(f.root,"state","c-cycle-run-state.json"),{lane_statuses:[
+    {lane_id:"followup-runner-747",role:"lab-runner",status:"failed"},
+    {lane_id:"followup-analyst-1286",role:"analyst",status:"pending"},
+    {lane_id:"followup-analyst-1288",role:"analyst",status:"pending"}]});
+
+  assert.deepEqual(repairQueuedAnalystContracts({cwd:f.cwd,cycleId:"c"}),["followup-analyst-1286"]);
+  const owner=JSON.parse(fs.readFileSync(path.join(f.root,"lanes","c","followup-analyst-1286","role-plan.json")));
+  assert.equal(owner.planner_metadata.failed_runner_context.lane_id,"followup-runner-747");
+  assert.equal(owner.planner_metadata.failed_runner_context.result_path,null);
+  assert.equal(owner.planner_metadata.failed_runner_context.executed_handoff_path,handoff);
+  assert.match(owner.planner_metadata.failed_runner_context.preflight_path,/analysis-contract-preflight\.json$/);
+  assert.deepEqual(owner.planner_metadata.failed_runner_context.analysis_contract_validation.problems,
+    ["executed_dataset_hash_mismatch"]);
+  assert.match(owner.followup_description,/preflight_path, role_plan_path, result_path when present/);
+  const other=JSON.parse(fs.readFileSync(path.join(f.root,"lanes","c","followup-analyst-1288","role-plan.json")));
+  assert.equal(other.planner_metadata.failed_runner_context,undefined);
+  assert.deepEqual(repairQueuedAnalystContracts({cwd:f.cwd,cycleId:"c"}),[]);
+});
 test("a first contract mismatch becomes a maintainer finding without requiring three crashes",()=>{
   const f=fixture(),c=currentAnalysisContract(f.root,"c"),d=path.join(f.root,"lanes","c","followup-runner-1");
   f.write(path.join(d,"lane-contract.json"),{role:"lab-runner"});

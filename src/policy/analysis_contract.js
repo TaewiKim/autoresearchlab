@@ -235,7 +235,7 @@ function bindAnalystPlan(plan, contract, recovery = null, measurements = []) {
     plan.planner_metadata.validation_results = recovery;
     plan.planner_metadata.analysis_request = analysisRequest;
     plan.analysis_request = analysisRequest;
-    plan.followup_description += ` Repair the failed execution in ${recovery.lane_id}: ${recovery.analysis_contract_validation.problems.join(", ")}. Read planner_metadata.failed_runner_context and its result and handoff paths, fix the frozen code that actually ran, and replace it with one newly authored immutable blueprint. Do not dispatch or relabel the failed script.`;
+    plan.followup_description += ` Repair the failed execution in ${recovery.lane_id}: ${recovery.analysis_contract_validation.problems.join(", ")}. Read planner_metadata.failed_runner_context, including its preflight_path, role_plan_path, result_path when present, and executed_handoff_path; fix the frozen code that was dispatched, and replace it with one newly authored immutable blueprint. Do not dispatch or relabel the failed script.`;
   }
   return true;
 }
@@ -263,16 +263,24 @@ function latestContractMismatch(root, cycleId, contract) {
   }).sort((left, right) => right.completed_at.localeCompare(left.completed_at));
   for (const { lane, dir, completed_at } of runners) {
     const resultPath = path.join(dir, "result.json"), result = read(resultPath);
-    const binding = result?.analysis_contract_validation || result?.validation_summary?.analysis_contract_validation;
-    if (binding?.contract_id !== contract.contract_id || binding.status !== "mismatch") continue;
+    const preflightPath = path.join(dir, "analysis-contract-preflight.json"), preflight = read(preflightPath);
+    const resultBinding = result?.analysis_contract_validation || result?.validation_summary?.analysis_contract_validation;
+    // MEASURED ON cycle-a-20260919, 2026-10-26: runners 745-747
+    // failed contract preflight on executed_dataset_hash_mismatch, so no
+    // result.json existed and no pending Analyst received the failure to repair.
+    const binding = resultBinding || preflight;
+    if (binding?.contract_id !== contract.contract_id || !["blocked", "mismatch"].includes(binding.status)) continue;
+    const rolePlanPath = path.join(dir, "role-plan.json"), rolePlan = read(rolePlanPath);
     return {
       lane_id: lane.lane_id,
       completed_at,
-      result_path: resultPath,
-      executed_handoff_path: result.executed_handoff_path || null,
+      result_path: result ? resultPath : null,
+      preflight_path: preflight ? preflightPath : null,
+      role_plan_path: rolePlan ? rolePlanPath : null,
+      executed_handoff_path: result?.executed_handoff_path || rolePlan?.planner_metadata?.analyst_handoff_path || null,
       analysis_contract_validation: binding,
-      analysis_trace: result.analysis_trace || null,
-      blueprint_executions: (result.blueprint_executions || []).map((execution) => ({
+      analysis_trace: result?.analysis_trace || null,
+      blueprint_executions: (result?.blueprint_executions || []).map((execution) => ({
         blueprint_id: execution.blueprint_id,
         check_id: execution.check_id,
         status: execution.status,
