@@ -56,7 +56,16 @@ const { repairQueuedAnalystContracts } = require("../policy/analysis_contract");
 const { codexLoginRevoked, readCodexLoginRequired, recordCodexLoginRequired } = require("./codex_login");
 
 const DEFAULT_MODEL = "gpt-5.6-sol";
-const DEFAULT_MAX_RUNS = 4;
+// The supervisor's attempts are limited per WEEK, not per cycle. A cycle runs for
+// weeks and finds new defects all along; a total fixed at the start leaves it
+// unattended for the rest of its life once spent.
+// MEASURED ON cycle-a-20260919, 2026-10-26: the lifetime cap (100) was
+// spent on 2026-10-19 (4, 8, 43, 15, 27 and 3 runs in the weeks to then), and for
+// the following week every finding the supervisor raised -- 11 of them, among
+// them work set aside again and again for one reason -- went unattended.
+// The last two full weeks used 15 and 27; the week of 43 is the runaway to bound.
+const DEFAULT_MAX_RUNS = 30;
+const MAX_RUNS_WINDOW_MS = 7 * 24 * 3600 * 1000;
 const DEFAULT_TIMEOUT_SECONDS = 45 * 60;
 const DEFAULT_MAX_DIFF_LINES = 400;
 // Rebases of an accepted-in-the-worktree fix onto a HEAD that moved during the
@@ -253,7 +262,9 @@ function maintainerConfig(env = process.env) {
     enabled: env.RESEARCHLAB_MAINTAINER === "1",
     push: env.RESEARCHLAB_MAINTAINER_PUSH === "1",
     restart: env.RESEARCHLAB_MAINTAINER_RESTART !== "0",
-    maxRuns: positive(env.RESEARCHLAB_MAINTAINER_MAX_RUNS, DEFAULT_MAX_RUNS),
+    // Runs allowed in any rolling seven days. RESEARCHLAB_MAINTAINER_MAX_RUNS,
+    // the old total over the cycle's life, is no longer read.
+    maxRuns: positive(env.RESEARCHLAB_MAINTAINER_MAX_RUNS_PER_WEEK, DEFAULT_MAX_RUNS),
     timeoutSeconds: positive(env.RESEARCHLAB_MAINTAINER_TIMEOUT_SECONDS, DEFAULT_TIMEOUT_SECONDS),
     maxDiffLines: positive(env.RESEARCHLAB_MAINTAINER_MAX_DIFF_LINES, DEFAULT_MAX_DIFF_LINES),
     // 0 turns rebasing off: a moved HEAD rejects the run, as it used to.
@@ -2375,6 +2386,23 @@ function countedRuns(state) {
   return (state.runs || []).filter((run) => run.not_counted !== true).length;
 }
 
+// The runs inside the rolling window, and when the next attempt is available.
+function windowRuns(state, nowMs) {
+  return (state.runs || [])
+    .filter((run) => run.not_counted !== true)
+    // A run with no readable start counts as having just happened: unknown must
+    // not read as free.
+    .map((run) => (Number.isFinite(Date.parse(run.started_at)) ? Date.parse(run.started_at) : nowMs))
+    .filter((ms) => nowMs - ms < MAX_RUNS_WINDOW_MS)
+    .sort((a, b) => a - b);
+}
+
+// When the count falls below `cap`: the (n - cap + 1)th oldest run ages out.
+function nextSlotAt(starts, cap) {
+  if (starts.length < cap) return null;
+  return new Date(starts[starts.length - cap] + MAX_RUNS_WINDOW_MS).toISOString();
+}
+
 function makeRunId(state, deps) {
   const index = String((state.runs || []).length + 1).padStart(2, "0");
   return `run-${index}-${nowIso(deps).replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z")}`;
@@ -2485,22 +2513,34 @@ function runMaintainer({ cwd, cycleId, error, staleSeconds, env, config, deps })
     }
     return null;
   }
-  if (countedRuns(state) >= config.maxRuns && primary.kind === HEALTH_KIND) {
+  const usedStarts = windowRuns(state, now);
+  const used = usedStarts.length;
+  const slotAt = nextSlotAt(usedStarts, config.maxRuns);
+  // Attempts are back: what the cap had said and stopped on is released, so it
+  // can say and stop again the next time it is spent.
+  if (!slotAt && (state.cap_reached_logged || state.cap_stopped_at || (state.health_unattended_logged || []).length)) {
+    state.cap_reached_logged = false;
+    state.cap_stopped_at = null;
+    state.health_unattended_logged = [];
+    saveState(ctx, state);
+    logEvent(ctx, "maintainer_cap_released", { runs_in_window: used, max_runs: config.maxRuns });
+  }
+  if (used >= config.maxRuns && primary.kind === HEALTH_KIND) {
     // Not a blocker: the cycle is moving. With no attempts left it is reported
     // (the health report above) and the cycle is never stopped for it.
     const logged = new Set(Array.isArray(state.health_unattended_logged) ? state.health_unattended_logged : []);
     if (!logged.has(primary.signature)) {
       state.health_unattended_logged = [...logged, primary.signature];
       saveState(ctx, state);
-      logEvent(ctx, "maintainer_health_finding_unattended", { max_runs: config.maxRuns, finding: primary });
+      logEvent(ctx, "maintainer_health_finding_unattended", { max_runs: config.maxRuns, runs_in_window: used, next_attempt_at: slotAt, finding: primary });
     }
     return null;
   }
-  if (countedRuns(state) >= config.maxRuns) {
+  if (used >= config.maxRuns) {
     if (!state.cap_reached_logged) {
       state.cap_reached_logged = true;
       saveState(ctx, state);
-      logEvent(ctx, "maintainer_cap_reached", { max_runs: config.maxRuns, pending_trigger: primary });
+      logEvent(ctx, "maintainer_cap_reached", { max_runs: config.maxRuns, runs_in_window: used, next_attempt_at: slotAt, pending_trigger: primary });
     }
     // Silence is the worst answer: the cycle keeps burning lanes on a blocker
     // nobody will fix.
@@ -2517,11 +2557,12 @@ function runMaintainer({ cwd, cycleId, error, staleSeconds, env, config, deps })
       code: CAP_TERMINATION_CODE,
       category: "supervisor_cap_reached",
       outcome: "supervisor_cap_reached",
-      reason: `the supervisor has no attempts left (${countedRuns(state)} of ${config.maxRuns}) and ${primary.kind} is still open: ${primary.detail || primary.signature}. Raise RESEARCHLAB_MAINTAINER_MAX_RUNS or fix it by hand, then resume.`,
+      reason: `the supervisor has no attempts left this week (${used} of ${config.maxRuns}; the next frees at ${slotAt}) and ${primary.kind} is still open: ${primary.detail || primary.signature}. Raise RESEARCHLAB_MAINTAINER_MAX_RUNS_PER_WEEK or fix it by hand, then resume.`,
       progress,
       metadata: {
         max_runs: config.maxRuns,
-        runs_used: countedRuns(state),
+        runs_used: used,
+        next_attempt_at: slotAt,
         pending_trigger: primary,
       },
       event: "maintainer_cap_stop",

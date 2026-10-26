@@ -572,7 +572,7 @@ test("with no attempts left a health finding is reported and never stops the cyc
   const outcome = maybeRunMaintainer({
     cwd: fx.cwd,
     cycleId: CYCLE,
-    env: { ...process.env, RESEARCHLAB_MAINTAINER: "1", RESEARCHLAB_MAINTAINER_MAX_RUNS: "1" },
+    env: { ...process.env, RESEARCHLAB_MAINTAINER: "1", RESEARCHLAB_MAINTAINER_MAX_RUNS_PER_WEEK: "1" },
   });
   assert.equal(outcome, null);
   assert.equal(fs.existsSync(path.join(fx.root, "state", `${CYCLE}-termination-code.json`)), false, "no stop code");

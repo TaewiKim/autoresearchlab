@@ -12,6 +12,7 @@ const { readCodexLoginRequired } = require("../src/orchestrator/codex_login");
 const {
   maintainAfterAbort,
   maybeRunMaintainer,
+  maintainerConfig,
   recoverInterruptedRun,
   __private,
 } = require("../src/orchestrator/maintainer");
@@ -509,21 +510,21 @@ test("an agent's prose about schemas is not an infrastructure signature; the run
   assert.equal(__private.infrastructureBugSignature("invalid_json_schema: additionalProperties must be false"), "schema-contract-error");
 });
 
-test("one attempt per signature and a per-cycle run cap", () => {
+test("one attempt per signature and a per-week run cap", () => {
   const fixture = makeFixture();
   writePause(fixture.cwd);
   const notABug = { verdict: verdict({ verdict: "environment_block", clears_pause: false }) };
-  const first = run(fixture, notABug, {}, { RESEARCHLAB_MAINTAINER_MAX_RUNS: "1" });
+  const first = run(fixture, notABug, {}, { RESEARCHLAB_MAINTAINER_MAX_RUNS_PER_WEEK: "1" });
   assert.equal(first.outcome.outcome, "no_fix");
   assert.equal(first.codexCalls.length, 1);
 
-  const again = run(fixture, notABug, {}, { RESEARCHLAB_MAINTAINER_MAX_RUNS: "1" });
+  const again = run(fixture, notABug, {}, { RESEARCHLAB_MAINTAINER_MAX_RUNS_PER_WEEK: "1" });
   assert.equal(again.outcome, null, "the same pause is not diagnosed twice");
   assert.equal(again.codexCalls.length, 0);
 
   // A different blocker, but the cycle's budget is spent.
   writePause(fixture.cwd, { evidence: "a different setup failure", phase: "prelaunch" });
-  const capped = run(fixture, notABug, {}, { RESEARCHLAB_MAINTAINER_MAX_RUNS: "1" });
+  const capped = run(fixture, notABug, {}, { RESEARCHLAB_MAINTAINER_MAX_RUNS_PER_WEEK: "1" });
   assert.equal(capped.codexCalls.length, 0);
   // MEASURED ON cycle-a-20260919, 2026-09-21: a spent cap dropped an
   // open blocker with one log line and the cycle kept burning lanes on it.
@@ -536,7 +537,7 @@ test("one attempt per signature and a per-cycle run cap", () => {
   assert.equal(capMarker.block_type, "supervisor_cap_reached");
   // The supervisor never diagnoses its own stop as plumbing: another pass sees
   // the cap marker and raises no pause trigger from it.
-  const afterStop = run(fixture, notABug, {}, { RESEARCHLAB_MAINTAINER_MAX_RUNS: "1" });
+  const afterStop = run(fixture, notABug, {}, { RESEARCHLAB_MAINTAINER_MAX_RUNS_PER_WEEK: "1" });
   assert.equal(afterStop.codexCalls.length, 0);
   const state = JSON.parse(fs.readFileSync(__private.statePath({ cwd: fixture.cwd, cycleId: CYCLE }), "utf8"));
   assert.equal(state.runs.length, 1);
@@ -1559,4 +1560,43 @@ test("a reload owes the maintainer the pass it skipped, made first on the new so
   calls.length = 0;
   run({ cwd, cycleId: CYCLE, staleSeconds: 60 });
   assert.deepEqual(calls, ["run-plan", "refresh", "maintainer"]);
+});
+
+test("the run cap is per week: older runs free attempts, and what the cap said is released", () => {
+  // MEASURED ON cycle-a-20260919, 2026-10-26: a cap on the cycle's whole
+  // life, spent on 2026-10-19, left every later finding unattended.
+  const fixture = makeFixture();
+  writePause(fixture.cwd);
+  const notABug = { verdict: verdict({ verdict: "environment_block", clears_pause: false }) };
+  const env = { RESEARCHLAB_MAINTAINER_MAX_RUNS_PER_WEEK: "1" };
+  const statePath = __private.statePath({ cwd: fixture.cwd, cycleId: CYCLE });
+  const first = run(fixture, notABug, {}, env);
+  assert.equal(first.outcome.outcome, "no_fix");
+
+  // A different blocker while that run is inside the week: capped, and it says when attempts return.
+  writePause(fixture.cwd, { evidence: "a different setup failure", phase: "prelaunch" });
+  const capped = run(fixture, notABug, {}, env);
+  assert.equal(capped.codexCalls.length, 0);
+  assert.equal(capped.outcome.outcome, "supervisor_cap_reached");
+  assert.match(capped.outcome.reason, /no attempts left this week \(1 of 1; the next frees at \d{4}-\d{2}-\d{2}T/);
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(state.cap_reached_logged, true);
+  assert.ok(state.cap_stopped_at);
+
+  // Eight days later the run has aged out of the window: the cap is released, and
+  // the blocker is diagnosed.
+  state.runs[0].started_at = new Date(Date.now() - 8 * 24 * 3600 * 1000).toISOString();
+  fs.writeFileSync(statePath, JSON.stringify(state));
+  const events = path.join(fixture.cwd, ".research-lab", "events", `${CYCLE}-maintainer.jsonl`);
+  writePause(fixture.cwd, { evidence: "yet another setup failure", phase: "prelaunch" });
+  const again = run(fixture, notABug, {}, env);
+  assert.equal(again.codexCalls.length, 1, "attempts are back");
+  const after = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(after.cap_reached_logged, false);
+  assert.equal(after.cap_stopped_at, null);
+  assert.match(fs.readFileSync(events, "utf8"), /maintainer_cap_released/);
+
+  // The retired lifetime variable is not read: 100 of them would have meant no cap at all.
+  assert.equal(maintainerConfig({ RESEARCHLAB_MAINTAINER: "1", RESEARCHLAB_MAINTAINER_MAX_RUNS: "100" }).maxRuns, 30);
+  assert.equal(maintainerConfig({ RESEARCHLAB_MAINTAINER: "1", RESEARCHLAB_MAINTAINER_MAX_RUNS_PER_WEEK: "12" }).maxRuns, 12);
 });

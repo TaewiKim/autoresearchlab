@@ -85,6 +85,7 @@ Not handled by `keys`; set them in your shell, or add them to
 | `RESEARCHLAB_FOLLOW` | `0`: `run-research` prints only its final summary | on |
 | `RESEARCHLAB_MAINTAINER` | `1`: a Codex maintainer diagnoses harness defects during a cycle and commits fixes to your clone. Use it on a native install with a git identity set (`git config user.name`, `user.email`) and `pytest` in the interpreter below; in the Docker image the clone lives in the container, so its commits would not outlive it | off |
 | `RESEARCHLAB_MAINTAINER_PUSH` | `1`: the maintainer also pushes its commits | off |
+| `RESEARCHLAB_MAINTAINER_MAX_RUNS_PER_WEEK` | Most maintainer runs in any rolling seven days. When they are used the cycle goes on and the maintainer's findings are logged as unattended until a run ages out of the window. (`RESEARCHLAB_MAINTAINER_MAX_RUNS`, a total over the cycle's life, is no longer read.) | `30` |
 | `RESEARCHLAB_MAINTAINER_PYTHON` | Interpreter for the maintainer's pytest gate; it needs `pytest` (`.venv/bin/pip install pytest`) | `python` |
 | `RESEARCHLAB_NATIVE_BIN` | Use a prebuilt harness binary instead of `native/researchlab-harness/target/release` | — |
 | `NODE_OPTIONS` | `--max-old-space-size=4096` for long cycles | — |
