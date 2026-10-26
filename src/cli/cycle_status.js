@@ -52,7 +52,14 @@ const HEADLINE = {
   tokens: (d) => {
     const m = (n) => (n == null ? "?" : n >= 1e9 ? `${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(0)}k` : String(n));
     const roles = (d.top_roles || []).map((r) => `${r.role} ${m(r.counted_tokens)}`).join(", ");
-    return `${m(d.counted_tokens)} counted (${m(d.billed_input_tokens)} input + ${m(d.output_tokens)} output) over ${d.turns} turns; last hour ${m(d.counted_last_hour)}, last 24h ${m(d.counted_last_24h)}${roles ? `; most: ${roles}` : ""}${d.token_budget ? `; ${Math.round((d.token_fraction || 0) * 100)}% of budget` : ""}`;
+    // The window the number really covers, when it is not the one asked for.
+    const span = (w, label, nominalSeconds) => {
+      if (!w) return `${label}: collecting`;
+      const off = Math.abs(w.window_seconds - nominalSeconds) > nominalSeconds * 0.2;
+      const real = w.window_seconds >= 7200 ? `${(w.window_seconds / 3600).toFixed(1)}h` : `${Math.round(w.window_seconds / 60)}m`;
+      return off ? `last ${real} ${m(w.tokens)} (history is that short)` : `${label} ${m(w.tokens)}`;
+    };
+    return `${m(d.counted_tokens)} counted (${m(d.billed_input_tokens)} input + ${m(d.output_tokens)} output) over ${d.turns} turns; ${span(d.counted_last_hour, "last hour", 3600)}, ${span(d.counted_last_24h, "last 24h", 86400)}${roles ? `; most: ${roles}` : ""}${d.token_budget ? `; ${Math.round((d.token_fraction || 0) * 100)}% of budget` : ""}`;
   },
   delivery: (d) => `${d.signals ?? 0} signals, ${d.produced_and_unread?.length ?? 0} produced and read by nobody`,
 };

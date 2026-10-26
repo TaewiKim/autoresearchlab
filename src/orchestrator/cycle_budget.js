@@ -269,6 +269,28 @@ function budgetLimits(env = process.env) {
 
 // `root` is the .research-lab directory itself, for a caller (status) that is
 // given that and not the directory above it.
+const HISTORY_INTERVAL_MS = 5 * 60 * 1000;
+const HISTORY_KEEP_MS = 49 * 3600 * 1000;
+
+// Tokens counted over roughly the last `spanMs`, from the sampled totals: the
+// difference between the current total and the sample nearest to `spanMs` ago.
+// The window is as long as the history allows (it starts when it was first
+// read, and is as dense as it was read), so `window_seconds` says how long it
+// really is; a caller shows it when it differs from the one asked for.
+function spentWithin(report, spanMs, now = Date.now()) {
+  const history = Array.isArray(report?.history) ? report.history : [];
+  const current = Number(report?.totals?.counted_tokens);
+  if (!history.length || !Number.isFinite(current)) return null;
+  const cutoff = now - spanMs;
+  let base = null;
+  for (const sample of history) {
+    if (!base || Math.abs(parseMs(sample.ts) - cutoff) < Math.abs(parseMs(base.ts) - cutoff)) base = sample;
+  }
+  const windowSeconds = Math.round((now - parseMs(base.ts)) / 1000);
+  if (windowSeconds < 60) return null;
+  return { tokens: Math.max(0, current - Number(base.counted_tokens || 0)), since: base.ts, window_seconds: windowSeconds };
+}
+
 function budgetPath({ cwd, cycleId, root = null }) {
   return path.join(root || path.join(cwd, ".research-lab"), "state", `${cycleId}-budget.json`);
 }
@@ -402,6 +424,17 @@ function updateBudget({ cwd, cycleId, env = process.env, now = Date.now(), miles
   const hoursFraction = fractionOf(elapsedHours, limits.hours_budget);
   const worst = Math.max(tokenFraction ?? 0, hoursFraction ?? 0);
 
+  // Totals sampled over time, so spend in a window is a difference of two
+  // totals. A lane's own spend cannot be placed in time (its usage events carry
+  // no timestamp), and a lane that ran for hours would put all of it at the
+  // moment it ended.
+  const history = Array.isArray(previous.history) ? previous.history.filter((sample) => parseMs(sample?.ts)) : [];
+  const lastSampleMs = history.length ? parseMs(history[history.length - 1].ts) : 0;
+  if (!lastSampleMs || now - lastSampleMs >= HISTORY_INTERVAL_MS) {
+    history.push({ ts: new Date(now).toISOString(), counted_tokens: counted });
+  }
+  while (history.length && now - parseMs(history[0].ts) > HISTORY_KEEP_MS) history.shift();
+
   const report = {
     cycle_id: cycleId,
     updated_at: new Date(now).toISOString(),
@@ -437,6 +470,7 @@ function updateBudget({ cwd, cycleId, env = process.env, now = Date.now(), miles
     by_milestone: Object.fromEntries(Object.entries(byMilestone).map(([key, value]) => [key, withDerived(value)])),
     by_lane: byLane,
     cursors,
+    history,
   };
 
   try {
@@ -452,6 +486,7 @@ module.exports = {
   budgetPath,
   countedTokens,
   readTurnsIncremental,
+  spentWithin,
   updateBudget,
   __private: { laneWallClock, laneActionType, laneRole, emptyTotals, withDerived },
 };

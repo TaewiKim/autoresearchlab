@@ -240,33 +240,38 @@ test("token usage is read from the lanes' own usage events, current whenever ask
   // refreshed only by the maintainer's pass, two hours old while lanes spent,
   // and nothing displayed tokens at all.
   const root = emptyCycle();
-  const lane = (id, usage, spawnedAt, endedAt) => {
+  const lane = (id, usage) => {
     const dir = path.join(root, "lanes", CYCLE, id);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, "stdout.log"), `${JSON.stringify({ type: "turn.completed", usage })}\n`);
-    fs.writeFileSync(path.join(dir, "final-status.json"), JSON.stringify({ completed_at: endedAt }));
-    fs.writeFileSync(path.join(dir, "events.jsonl"), [
-      JSON.stringify({ event_type: "lane_spawned", ts: spawnedAt }),
-      JSON.stringify({ event_type: "lane_completed", ts: endedAt }),
-    ].join("\n"));
+    fs.writeFileSync(path.join(dir, "stdout.log"), `${JSON.stringify({ type: "turn.completed", usage })}
+`);
+    fs.writeFileSync(path.join(dir, "final-status.json"), JSON.stringify({ completed_at: new Date().toISOString() }));
   };
-  const hourAgo = new Date(Date.now() - 20 * 60000).toISOString(); // 20 minutes ago: inside the last hour
-  const earlier = new Date(Date.now() - 30 * 3600000).toISOString();
-  lane("followup-scout-01", { input_tokens: 1000, cached_input_tokens: 400, output_tokens: 100 }, earlier, earlier);
-  lane("followup-scout-02", { input_tokens: 5000, cached_input_tokens: 4000, output_tokens: 500 }, hourAgo, hourAgo);
+  lane("followup-scout-01", { input_tokens: 1000, cached_input_tokens: 400, output_tokens: 100 });
+  lane("followup-scout-02", { input_tokens: 5000, cached_input_tokens: 4000, output_tokens: 500 });
+  // Totals sampled earlier: 2 hours ago 100, 30 minutes ago 1000.
+  const sample = (minutesAgo, counted) => ({ ts: new Date(Date.now() - minutesAgo * 60000).toISOString(), counted_tokens: counted });
+  fs.writeFileSync(path.join(root, "state", `${CYCLE}-budget.json`), JSON.stringify({ history: [sample(120, 100), sample(30, 1000)] }));
   const tokens = cycleStatus({ root, cycleId: CYCLE }).checks.find((item) => item.id === "tokens");
   assert.equal(tokens.verdict, VERDICT.OK);
   // counted = (input - cached) + output
   assert.equal(tokens.detail.counted_tokens, (1000 - 400 + 100) + (5000 - 4000 + 500));
   assert.equal(tokens.detail.turns, 2);
-  assert.equal(tokens.detail.counted_last_hour, 1500);
-  assert.equal(tokens.detail.counted_last_24h, 1500);
+  // The window is a difference of two sampled totals, not lanes placed by when they ended.
+  // The sample nearest an hour ago is the 30-minute one, so the window is 30 minutes, and says so.
+  assert.equal(tokens.detail.counted_last_hour.tokens, 2200 - 1000);
+  assert.ok(Math.abs(tokens.detail.counted_last_hour.window_seconds - 1800) < 5);
+  // The history does not reach 24 hours back: the oldest sample stands in, and says so.
+  assert.equal(tokens.detail.counted_last_24h.tokens, 2200 - 100);
+  assert.ok(Math.abs(tokens.detail.counted_last_24h.window_seconds - 7200) < 5);
   // A new turn appended later is picked up on the next ask, without a maintainer pass.
   fs.appendFileSync(path.join(root, "lanes", CYCLE, "followup-scout-02", "stdout.log"),
-    `${JSON.stringify({ type: "turn.completed", usage: { input_tokens: 300, cached_input_tokens: 0, output_tokens: 50 } })}\n`);
+    `${JSON.stringify({ type: "turn.completed", usage: { input_tokens: 300, cached_input_tokens: 0, output_tokens: 50 } })}
+`);
   const again = cycleStatus({ root, cycleId: CYCLE }).checks.find((item) => item.id === "tokens");
   assert.equal(again.detail.turns, 3);
   assert.equal(again.detail.counted_tokens, 700 + 1500 + 350);
+  assert.equal(again.detail.counted_last_hour.tokens, 2550 - 1000);
   fs.rmSync(root, { recursive: true, force: true });
 });
 

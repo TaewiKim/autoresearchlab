@@ -347,7 +347,7 @@ function deliveryCheck(root, cycleId) {
 // MEASURED ON cycle-a-20260919, 2026-10-26: budget.json was two hours
 // stale with a lane starting every few seconds, and nothing displayed tokens.
 function tokensCheck(root, cycleId) {
-  const { updateBudget, budgetPath } = require("../orchestrator/cycle_budget");
+  const { updateBudget, budgetPath, spentWithin } = require("../orchestrator/cycle_budget");
   const file = budgetPath({ root, cycleId });
   let report = null;
   try {
@@ -358,13 +358,8 @@ function tokensCheck(root, cycleId) {
     return check("tokens", "token usage", VERDICT.ABSENT, {}, file, "no turn.completed usage events in any lane yet");
   }
   const now = Date.now();
-  const windows = { last_hour: 3600000, last_24h: 86400000 };
-  const recent = { last_hour: 0, last_24h: 0 };
-  for (const lane of Object.values(report.by_lane || {})) {
-    const endMs = lane.ended_at ? Date.parse(lane.ended_at) : (lane.running ? now : 0);
-    if (!endMs) continue;
-    for (const [name, span] of Object.entries(windows)) if (now - endMs <= span) recent[name] += Number(lane.counted_tokens || 0);
-  }
+  const lastHour = spentWithin(report, 3600000, now);
+  const last24h = spentWithin(report, 86400000, now);
   const limits = report.limits || {};
   const state = report.status || {};
   const heavy = Object.entries(report.by_role || {})
@@ -377,8 +372,8 @@ function tokensCheck(root, cycleId) {
     output_tokens: report.totals.output_tokens ?? null,
     turns: report.totals.turns,
     lanes_measured: report.lanes_measured ?? null,
-    counted_last_hour: recent.last_hour,
-    counted_last_24h: recent.last_24h,
+    counted_last_hour: lastHour,
+    counted_last_24h: last24h,
     top_roles: heavy.map(([role, tokens]) => ({ role, counted_tokens: tokens })),
     token_budget: limits.token_budget ?? null,
     token_fraction: state.token_fraction ?? null,
