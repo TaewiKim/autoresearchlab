@@ -54,6 +54,10 @@ const HEADLINE = {
     return `round ${d.gate_rounds ?? "?"}${parts}${d.latest_score != null ? `, latest ${d.latest_score}${mode}${partial}` : ""}${d.gate_passed ? ", PASSED" : ""}, best ${JSON.stringify(d.best_by_rubric || {})}${d.rounds_whole ? " over whole rounds" : ""}`;
   },
   capability: (d) => `${d.verified ?? 0} verified, ${d.unavailable ?? 0} measured absent${d.implemented_but_not_probed?.length ? `, UNPROBED: ${d.implemented_but_not_probed.join(", ")}` : ""}`,
+  clues: (d) => {
+    const kinds = Object.entries(d.by_kind || {}).map(([kind, n]) => `${kind} ${n}`).join(", ");
+    return d.total ? `${d.total} recorded, ${d.live} live (${d.high} high)${kinds ? `: ${kinds}` : ""}` : "none yet";
+  },
   tokens: (d) => {
     const m = (n) => (n == null ? "?" : n >= 1e9 ? `${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(0)}k` : String(n));
     const roles = (d.top_roles || []).map((r) => `${r.role} ${m(r.counted_tokens)}`).join(", ");

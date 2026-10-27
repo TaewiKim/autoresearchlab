@@ -203,6 +203,7 @@ pub(crate) fn codex_output_schema(role: &str, action_type: &str) -> Option<Value
                 "next_actions",
                 "experiment_request_decisions",
                 "resume_lead_decision",
+                "research_clue_updates",
                 "research_problem",
                 "selected_hypothesis",
                 "chronicle_requests",
@@ -303,6 +304,29 @@ pub(crate) fn codex_output_schema(role: &str, action_type: &str) -> Option<Value
                     },
                     "required": ["lead_id", "decision", "reason", "evidence_refs"],
                     "additionalProperties": false
+                },
+                // The clues the director keeps whatever happens to the lead
+                // (src/reporting/research_clues.js): add a new one, or update one
+                // already in `planner_metadata.research_clues`.
+                "research_clue_updates": {
+                    "type": ["array", "null"],
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "op": { "type": "string", "enum": ["add", "update"] },
+                            "clue_id": { "type": ["string", "null"] },
+                            "kind": { "type": ["string", "null"], "enum": ["measured_result", "prior_art", "design_strength", "dead_end", "data_fact", "open_question", "idea", null] },
+                            "statement": { "type": ["string", "null"] },
+                            "why_it_matters": { "type": ["string", "null"] },
+                            "evidence_refs": { "type": ["array", "null"], "items": { "type": "string" } },
+                            "lead_key": { "type": ["string", "null"] },
+                            "importance": { "type": ["string", "null"], "enum": ["high", "medium", "low", null] },
+                            "status": { "type": ["string", "null"], "enum": ["open", "in_use", "resolved", "retired", null] },
+                            "note": { "type": ["string", "null"] }
+                        },
+                        "required": ["op", "clue_id", "kind", "statement", "why_it_matters", "evidence_refs", "lead_key", "importance", "status", "note"],
+                        "additionalProperties": false
+                    }
                 },
                 "research_problem": {
                     "type": ["object", "null"],
@@ -1064,6 +1088,7 @@ mod tests {
             .expect("properties");
         for field in [
             "experiment_request_decisions",
+            "research_clue_updates",
             "research_problem",
             "selected_hypothesis",
             "chronicle_requests",

@@ -52,6 +52,10 @@ fn lab_director_task_markdown_requires_research_notes() {
         "lab-director task_markdown missing research notes duty"
     );
     assert!(
+        md.contains("research_clues_duty") && md.contains("research_clue_updates"),
+        "lab-director task_markdown missing the clue register duty"
+    );
+    assert!(
         md.contains("cycle-test-lab-director-research-notes.md")
             && md.contains("cycle-test-lab-director-research-notes.json"),
         "lab-director notes must include both Markdown and JSON paths"

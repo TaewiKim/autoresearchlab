@@ -210,7 +210,7 @@ test("the shape a dashboard reads is stable", () => {
   // Ids are the dashboard's keys; renaming one silently moves a panel.
   assert.deepEqual(
     status.checks.map((item) => item.id),
-    ["run", "retrieval", "corpus", "graph", "survey", "lead", "experiments", "gate", "capability", "delivery", "tokens"],
+    ["run", "retrieval", "corpus", "graph", "survey", "lead", "experiments", "gate", "capability", "delivery", "tokens", "clues"],
   );
   assert.ok(JSON.parse(JSON.stringify(status)), "the report must survive a JSON round trip");
   fs.rmSync(root, { recursive: true, force: true });

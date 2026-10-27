@@ -395,6 +395,21 @@ function tokensCheck(root, cycleId) {
   }, file, state.exhausted ? "the token budget is spent" : state.warned ? "80% or more of the token budget" : null);
 }
 
+// The clues the director keeps, folded in from its decisions when asked.
+function cluesCheck(root, cycleId) {
+  const research = require("./research_clues");
+  try {
+    research.applyDirectorClueUpdates({ root, cycleId });
+  } catch { /* read what is on disk */ }
+  const register = research.readRegister(root, cycleId);
+  const file = research.cluesPath(root, cycleId);
+  if (!register.clues.length) {
+    return check("clues", "research clues", VERDICT.ABSENT, { total: 0 }, file,
+      "the director has recorded none yet (research_clue_updates in its decisions)");
+  }
+  return check("clues", "research clues", VERDICT.OK, research.summarize(register), file, null);
+}
+
 function cycleStatus({ root, cycleId }) {
   const checks = [
     runCheck(root, cycleId),
@@ -408,6 +423,7 @@ function cycleStatus({ root, cycleId }) {
     capabilityCheck(root, cycleId),
     deliveryCheck(root, cycleId),
     tokensCheck(root, cycleId),
+    cluesCheck(root, cycleId),
   ];
   return {
     schema: "researchlab.cycle_status.v1",

@@ -407,6 +407,7 @@ pub(crate) fn refresh_role_plan_context_before_launch(
         // (rebuttal_targets) and the pilot results of the runner-up candidates
         // it ordered (alternate_pilots), so a replacement starts from a pilot.
         if is_director_lane {
+            planner_metadata["research_clues"] = research_clues_payload(paths, cycle_id);
             if let Some(targets) = rebuttal_targets(paths, cycle_id) {
                 planner_metadata["rebuttal_targets"] = targets;
             }
@@ -1200,6 +1201,41 @@ mod simulator_digest_tests {
     }
 }
 
+/// The director's clue register, as the next director lane is handed it.
+///
+/// The register is kept by src/reporting/research_clues.js from the
+/// `research_clue_updates` in the director's own decisions, and the file carries
+/// the view it wants shown (live clues first, the most important first, compact).
+/// Delivered on every director lane, empty included: an empty register is the
+/// prompt to start one.
+fn research_clues_payload(paths: &AppPaths, cycle_id: &str) -> Value {
+    let path = state_root(paths).join(format!("{cycle_id}-research-clues.json"));
+    let register = read_json_if_below(&path, 2 * 1024 * 1024).ok().flatten();
+    let view = register
+        .as_ref()
+        .and_then(|value| value.get("director_view"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let clues = register
+        .as_ref()
+        .and_then(|value| value.get("clues"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let live = clues
+        .iter()
+        .filter(|clue| matches!(clue.get("status").and_then(Value::as_str), Some("open") | Some("in_use")))
+        .count();
+    json!({
+        "register": view,
+        "clues_total": clues.len(),
+        "clues_live": live,
+        "recorded_in": format!(".research-lab/state/{cycle_id}-research-clues.json"),
+        "how_to_use": "Your clue register, kept whatever happens to the lead. Read it before you choose, refine, replace or conclude. Record what this round taught that the next lead should not have to find out again in `research_clue_updates` (add a clue, or update one by `clue_id`); resolving or retiring a clue needs a note saying why. See research_clues_duty.",
+    })
+}
+
 /// The ledger's standing lead-protection decision, if one is active.
 ///
 /// Written by src/reporting/reviews/gate/build.js on every gate build.
@@ -1382,6 +1418,33 @@ mod rebuttal_and_alternate_pilot_tests {
 
         write_json(&gate_path, &json!({"gate_passed": true, "rubric": []})).unwrap();
         assert!(rebuttal_targets(&paths, "c").is_none(), "a passed gate needs no rebuttal");
+    }
+
+    #[test]
+    fn the_clue_register_reaches_the_director_even_when_it_is_empty() {
+        let temp = TempDir::new().unwrap();
+        let paths = paths_for(temp.path());
+        // Nothing recorded yet: the register is still delivered, as the prompt to start one.
+        let empty = research_clues_payload(&paths, "c");
+        assert_eq!(empty["clues_total"], json!(0));
+        assert_eq!(empty["register"], json!([]));
+        assert!(empty["how_to_use"].as_str().unwrap().contains("research_clue_updates"));
+
+        let path = state_root(&paths).join("c-research-clues.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_json(&path, &json!({
+            "clues": [
+                {"clue_id": "c-1", "status": "open", "importance": "high"},
+                {"clue_id": "c-2", "status": "in_use", "importance": "medium"},
+                {"clue_id": "c-3", "status": "retired", "importance": "low"}
+            ],
+            "director_view": [{"clue_id": "c-1", "statement": "x"}, {"clue_id": "c-2", "statement": "y"}]
+        })).unwrap();
+        let filled = research_clues_payload(&paths, "c");
+        assert_eq!(filled["clues_total"], json!(3));
+        assert_eq!(filled["clues_live"], json!(2), "retired clues are not live");
+        assert_eq!(filled["register"].as_array().unwrap().len(), 2);
+        assert_eq!(filled["recorded_in"], json!(".research-lab/state/c-research-clues.json"));
     }
 
     #[test]

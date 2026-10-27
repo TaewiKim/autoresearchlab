@@ -246,6 +246,8 @@ JS Commands:
                gate scores, harness notices, maintainer fixes
   status --cycle-id <id> [--json]
                one line per stage of the cycle; exits 1 when one needs attention
+  clues --cycle-id <id> [--all] [--json]
+               the research clues the LabDirector keeps (results, prior art, dead ends, open questions)
   candidates --cycle-id <id> [--json]
                the expert-selected candidate problems waiting for your choice
   select --cycle-id <id> --candidate <candidate-id|release> [--note <why>]
@@ -632,6 +634,17 @@ function main() {
       process.stderr.write(`${process.argv[2]}: ${error.message}\n`);
       process.exit(1);
     });
+    return;
+  }
+
+  if (process.argv[2] === "clues") {
+    try {
+      require("./clues").runCluesCommand(process.argv.slice(3));
+    } catch (error) {
+      process.stderr.write(`clues: ${error.message}
+`);
+      process.exit(1);
+    }
     return;
   }
 

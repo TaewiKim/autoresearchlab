@@ -21,7 +21,7 @@ described below.
 
 | Role | Instances | Decides | Hands on | May not |
 |---|---|---|---|---|
-| **LabDirector** | one lane per decision | Which problem is the lead; refine, pivot or conclude; how to answer your messages | The lead hypothesis (claim, estimands, falsification conditions, rival mechanisms), its scope, the next lanes | Override a gatekeeper's scores |
+| **LabDirector** | one lane per decision | Which problem is the lead; refine, pivot or conclude; how to answer your messages; which findings are worth keeping (its clue register) | The lead hypothesis (claim, estimands, falsification conditions, rival mechanisms), its scope, the next lanes, the clues | Override a gatekeeper's scores |
 | **Scout** | many | Which papers and datasets are relevant, after reading their abstracts | The admitted corpus, the field landscape, SOTA deep reads, fetched data | Admit a paper it has not read |
 | **Chronicle** | recurring | How the evidence links together | Briefs, the knowledge graph, the decision digest the director works from | Choose the lead |
 | **Analyst** | per design | What to measure: the question, estimand, comparator and validity gates, and what would falsify the claim | An executable handoff, the preregistered analysis contract, the capabilities it needs | Install or run the tools itself |
@@ -116,3 +116,22 @@ answers them in its next decision lane.
 `researchlab follow` prints every lane as it starts and ends, with the role
 and what it found. Each lane's full record is in
 `.research-lab/lanes/<cycle>/<lane-id>/`. See [CLI.md](CLI.md).
+
+## The clue register
+
+The LabDirector's notebook is a summary of where the cycle stands now, and it is
+rewritten at each decision. What a lead taught the cycle should outlive the
+lead, so the director also keeps a **register of clues**: a measured result and
+what it rules in or out, the prior art that closes a direction, the part of a
+design that earned a high score, a path that is dead and why, a fact about the
+data, a question still open, an idea not yet tried. The director decides what
+is a clue and how important it is, records them with their evidence in each
+decision, and updates or retires them (retiring needs a reason). Every later
+director lane is handed the register, live and most important clues first.
+
+```bash
+researchlab clues --cycle-id my-cycle
+```
+
+shows it, and `researchlab status` counts it. The register is the file
+`state/<cycle>-research-clues.json`, rebuilt from the director's own decisions.

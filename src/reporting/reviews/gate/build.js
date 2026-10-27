@@ -6,6 +6,7 @@ const { assertHarnessSourceCurrent } = require("../../../runtime/source_revision
 const { appendReviewOnce } = require("../../../observability/cycle_logs");
 const { writeJson } = require("../../../shared/json");
 const hypothesisProgress = require("../../hypothesis_progress");
+const { applyDirectorClueUpdates } = require("../../research_clues");
 const { runtimeRoot } = require("../../../runtime/native_client");
 const { compactGraph, compactHypotheses, compactValidationGaps } = require("../../../shared/context_compaction");
 const { canAdvanceWithHighScoreNudge } = require("../../conclusion_review");
@@ -260,6 +261,11 @@ function buildGateReview({
 }) {
   assertHarnessSourceCurrent({ cwd });
   const root = runtimeRoot(cwd);
+  // The clues the director recorded in its decisions since the last gate build
+  // are folded into the register the next director lane is handed.
+  try {
+    applyDirectorClueUpdates({ root, cycleId });
+  } catch { /* the register is the director's aid; it must never stop a gate build */ }
   const summary = researcherView?.summary || researcherView || {};
   const conclusion = conclusionReview?.review || conclusionReview || {};
   const approval = approvalReview?.review || approvalReview || {};

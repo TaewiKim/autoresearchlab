@@ -138,6 +138,7 @@ const STATE_PROVENANCE = {
   "lane-manifest": { class: "derived", why: "rebuilt from the lane tree and the event log" },
   "lane-timeline": { class: "derived", why: "rebuilt from the lane tree and the event log" },
   "lead-protection": { class: "authoritative", why: "a decision to protect a lead from churn" },
+  "research-clues": { class: "derived", why: "the LabDirector's clue register, rebuilt from the research_clue_updates in its lane results" },
   "literature-graph": { class: "derived", why: "rebuilt from the lane tree and the event log" },
   "literature-summary": { class: "derived", why: "rebuilt from the lane tree and the event log" },
   "literature-synthesis-scan-cache": { class: "derived", why: "rebuilt from the lane tree and the event log" },

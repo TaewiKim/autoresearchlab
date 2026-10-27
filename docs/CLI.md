@@ -244,4 +244,5 @@ docker run --rm -v rl-state:/state -v "$PWD:/out" ubuntu:24.04 cp -r /state /out
 | `researchlab import-codex-auth` | Re-import the Codex login after `codex login` |
 | `researchlab keys list` / `keys set <name>` / `keys unset <name>` | Your API keys (masked when listed; never taken as an argument) |
 | `researchlab candidates --cycle-id <id>` / `select --cycle-id <id> --candidate <id>` | The owner checkpoint: see the candidate problems, choose one |
+| `researchlab clues --cycle-id <id> [--all] [--json]` | The research clues the LabDirector keeps: measured results, prior art, what earned a high score, dead ends, open questions (`--all` adds resolved and retired ones) |
 | `researchlab native-build` | Rebuild the native harness |
