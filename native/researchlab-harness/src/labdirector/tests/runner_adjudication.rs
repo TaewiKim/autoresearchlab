@@ -120,7 +120,7 @@ fn supporting_audit_is_not_discarded_when_primary_claim_contract_changes() {
 }
 
 #[test]
-fn a_contract_measured_twice_is_not_run_a_third_time() {
+fn a_contract_measured_once_is_not_run_again() {
     // cycle-a-20260919, 2026-10-18: 18 runners executed contract
     // 12daf336 and wrote the same four estimates each time.
     let temp = TempDir::new().unwrap();
@@ -170,15 +170,16 @@ fn a_contract_measured_twice_is_not_run_a_third_time() {
         verified_primary_measurements(&paths, cycle, &handoff(None)["analysis_contract"]).unwrap(),
         vec!["followup-runner-458"]
     );
-    // Measured once: a reproduction is still run.
-    assert_eq!(actions_for(handoff(None)).len(), 1);
+    assert!(actions_for(handoff(None)).is_empty());
+    let notices = fs::read_to_string(crate::core::support::harness_notices_path(&paths, cycle)).unwrap();
+    assert_eq!(notices.lines().filter(|line| line.contains("contract_already_measured")).count(), 1);
+    assert!(notices.contains("followup-runner-458"));
 
     runner("followup-runner-459", "verified");
     assert!(actions_for(handoff(None)).is_empty());
     assert!(actions_for(handoff(None)).is_empty());
     let notices = fs::read_to_string(crate::core::support::harness_notices_path(&paths, cycle)).unwrap();
     assert_eq!(notices.lines().filter(|line| line.contains("contract_already_measured")).count(), 1);
-    assert!(notices.contains("followup-runner-459"));
     // A supporting audit asks something the measurement did not; it runs.
     assert!(handoff_is_supporting_only(&handoff(Some("supporting"))));
     assert_eq!(actions_for(handoff(Some("supporting"))).len(), 1);
@@ -192,6 +193,71 @@ fn a_contract_measured_twice_is_not_run_a_third_time() {
     let mut other = handoff(None);
     other["analysis_contract"]["contract_id"] = json!("analysis:d03b2918");
     assert_eq!(actions_for(other).len(), 1);
+}
+
+#[test]
+fn measured_robotics_handoffs_do_not_create_the_second_primary_runner() {
+    // MEASURED ON cycle-a-20260919, 2026-10-26: runner 779 completed
+    // the registered primary measurement, but analyst 1312's different script
+    // still created runner 780 and wrote the same ten estimands on the same data.
+    let temp = TempDir::new().unwrap();
+    let paths = build_paths(temp.path());
+    let cycle = "cycle-a-20260919";
+    let contract = "analysis:d581ff638d51ea2fe0a64553865dc5b7e7e77beed234ffad1ea8b9d81531c7bf";
+    let measured_dir = lane_root(&paths, cycle, "followup-runner-779");
+    fs::create_dir_all(&measured_dir).unwrap();
+    write_json(
+        &measured_dir.join("lane-contract.json"),
+        &json!({"lane_id": "followup-runner-779", "role": "lab-runner"}),
+    )
+    .unwrap();
+    write_json(
+        &measured_dir.join("analysis-contract-preflight.json"),
+        &json!({"contract_id": contract, "status": "ready", "evidence_role": "primary"}),
+    )
+    .unwrap();
+    write_json(
+        &measured_dir.join("result.json"),
+        &json!({"analysis_contract_validation": {
+            "contract_id": contract,
+            "status": "verified",
+            "evidence_role": "primary"
+        }}),
+    )
+    .unwrap();
+
+    let handoff_path = lane_root(&paths, cycle, "followup-analyst-1312")
+        .join("handoff-validation-plan.json");
+    let handoff = json!({
+        "analysis_contract": {"contract_id": contract},
+        "handoff_checks": [{
+            "check_id": "directional_support_v2_contract_validation",
+            "column_mapping": [{"key": "analysis_evidence_role", "column": "primary"}]
+        }],
+        "validation_code_blueprints": [{
+            "check_id": "directional_support_v2_contract_validation",
+            "code": "# second script computing the same registered estimands"
+        }]
+    });
+    let mut actions = Vec::new();
+    push_analyst_handoff_followup_action(
+        &paths,
+        cycle,
+        &mut actions,
+        "analyst-handoff",
+        "analyst",
+        handoff_path.to_string_lossy().to_string(),
+        handoff,
+        120,
+        "",
+    )
+    .unwrap();
+
+    assert!(actions.is_empty(), "runner 780 would repeat runner 779");
+    let notices = fs::read_to_string(crate::core::support::harness_notices_path(&paths, cycle)).unwrap();
+    assert!(notices.contains("contract_already_measured"));
+    assert!(notices.contains("followup-runner-779"));
+    assert!(notices.contains("no lab-runner is created"));
 }
 
 #[test]

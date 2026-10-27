@@ -78,9 +78,13 @@ pub(crate) fn note_stale_handoff_contract(paths: &AppPaths, cycle_id: &str, hand
 }
 
 /// How many verified primary measurements of one analysis contract are run
-/// before another primary execution of it is held: the measurement and one
-/// independent reproduction.
-pub(crate) const CONTRACT_MEASUREMENTS_BEFORE_HOLD: usize = 2;
+/// before another primary execution of it is held.
+///
+/// MEASURED ON cycle-a-20260919, 2026-10-26: runners 779 and 780
+/// ran two scripts for the same estimands on the same sealed data, then runner
+/// 781 existed only to compare their identical results. Once the registered
+/// measurement exists, later analysts must receive it instead of reproducing it.
+pub(crate) const CONTRACT_MEASUREMENTS_BEFORE_HOLD: usize = 1;
 
 /// Whether every check of the handoff is a supporting audit
 /// (`column_mapping.analysis_evidence_role = "supporting"`), as the runner's

@@ -198,11 +198,27 @@ fn result_declares_falsification(result: &Value) -> bool {
             })
 }
 
+fn result_declares_design_invalid(result: &Value) -> bool {
+    result
+        .get("blueprint_executions")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|execution| {
+                execution.get("status").and_then(Value::as_str) == Some("completed")
+                    && execution
+                        .pointer("/metrics/resolution_status")
+                        .and_then(Value::as_str)
+                        == Some("not_estimable_design_invalid")
+            })
+        })
+}
+
 #[derive(Debug, Default, PartialEq)]
 struct LeadEvidence {
     /// First runner, by completion, that executed a post-selection handoff and measured something.
     evidence_runner: Option<String>,
     falsified_by: Option<String>,
+    design_invalidated_by: Option<String>,
     gated_by: Option<String>,
     execution_blocker: Option<String>,
     blocker_gated_by: Option<String>,
@@ -291,6 +307,7 @@ fn lead_evidence_since(
     };
     let mut evidence: Option<(u64, String)> = None;
     let mut falsified_by = None;
+    let mut design_invalidated_by = None;
     let mut gatekeepers: Vec<(u64, String)> = Vec::new();
     let mut matching_gatekeepers: Vec<(u64, String)> = Vec::new();
     let mut execution_blocker: Option<(u64, String)> = None;
@@ -352,6 +369,17 @@ fn lead_evidence_since(
         if !handoff_is_for_this_lead {
             continue;
         }
+        // MEASURED ON cycle-a-20260919, 2026-10-26: runner 777
+        // correctly stopped at a registered validity gate and recorded
+        // not_estimable_design_invalid. Because that fail-closed result sets
+        // produced_evidence=false, the hold saw no execution and indefinitely
+        // deferred the director's prospective replacement design.
+        if done_ms >= selected_ms
+            && design_invalidated_by.is_none()
+            && result_declares_design_invalid(&result)
+        {
+            design_invalidated_by = Some(lane_id.clone());
+        }
         let measured = result
             .get("blueprint_executions")
             .and_then(Value::as_array)
@@ -391,6 +419,7 @@ fn lead_evidence_since(
     LeadEvidence {
         evidence_runner: evidence.map(|(_, lane_id)| lane_id),
         falsified_by,
+        design_invalidated_by,
         gated_by,
         execution_blocker: execution_blocker.map(|(_, lane_id)| lane_id),
         blocker_gated_by,
@@ -444,11 +473,14 @@ fn lead_hold_release(
         "evidence_runner": evidence.evidence_runner,
         "gated_by": evidence.gated_by,
         "falsified_by": evidence.falsified_by,
+        "design_invalidated_by": evidence.design_invalidated_by,
         "execution_blocker": evidence.execution_blocker,
         "blocker_gated_by": evidence.blocker_gated_by,
     });
     let reason = if evidence.falsified_by.is_some() {
         Some("lead_falsified_by_its_own_validation")
+    } else if evidence.design_invalidated_by.is_some() {
+        Some("lead_design_invalidated_by_its_own_validation")
     } else if evidence.gated_by.is_some() {
         Some("lead_evidence_reviewed_by_gate")
     } else if evidence.blocker_gated_by.is_some() {

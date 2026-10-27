@@ -607,7 +607,7 @@ test("the maintainer's brief for a health finding says the cycle is running", ()
 // cycle-a-20260919, 2026-10-16..18: four defects found by reading the
 // lanes by hand, again, while every detector above was quiet.
 
-function measuredRunner(fx, laneId, { completedMs, estimate = "0.89921875", script = laneId, label = null }) {
+function measuredRunner(fx, laneId, { completedMs, estimate = "0.89921875", script = laneId, label = null, evidenceRole = "primary" }) {
   const dir = path.join(fx.lanes, laneId);
   const table = path.join(dir, "primary_contrasts.csv");
   write(table, `contrast_id,estimate,simultaneous_lower,simultaneous_upper\ndp_r030,${estimate},0.1584535838,1.6399839162\ndp_r020,0.2414,-0.3045,0.79\n`);
@@ -616,7 +616,7 @@ function measuredRunner(fx, laneId, { completedMs, estimate = "0.89921875", scri
     result: {
       status: "completed",
       ...(label ? { degraded: true, failure_category: label } : {}),
-      analysis_contract_validation: { status: "verified", evidence_role: "primary", executed_code_sha256: [shaOf(script)] },
+      analysis_contract_validation: { status: evidenceRole === "primary" ? "verified" : "supporting", evidence_role: evidenceRole, executed_code_sha256: [shaOf(script)] },
       blueprint_executions: [{ status: "completed", tables: [{ name: "primary_contrasts.csv", path: table }] }],
     },
   });
@@ -648,6 +648,27 @@ test("runners that keep writing the same numbers from new scripts are one repeat
   const table = path.join(renamed.lanes, "followup-runner-497", "primary_contrasts.csv");
   fs.writeFileSync(table, fs.readFileSync(table, "utf8").replace("dp_r030", "r030_success_dp_minus_raw").replace("dp_r020", "secondary_r020"));
   assert.deepEqual(subtypes(pipelineHealthFindings({ cwd: renamed.cwd, cycleId: CYCLE, now, sinceMs: 0 })), ["repeated_result"]);
+});
+
+test("supporting audits that carry the verified primary table are not repeated measurements", () => {
+  // MEASURED ON cycle-a-20260919, 2026-10-26: primary runner 782 and
+  // supporting runners 783/784 all exposed the same primary_contrasts.csv;
+  // the latter ran distinct cluster- and policy-influence audits and marked
+  // their analysis_contract_validation evidence_role as supporting.
+  const fx = fixture(), now = Date.now();
+  measuredRunner(fx, "followup-runner-782", { completedMs: now - 2 * HOUR, estimate: "0.2546527777777778" });
+  measuredRunner(fx, "followup-runner-783", {
+    completedMs: now - HOUR,
+    estimate: "0.2546527777777778",
+    evidenceRole: "supporting",
+  });
+  measuredRunner(fx, "followup-runner-784", {
+    completedMs: now,
+    estimate: "0.2546527777777778",
+    evidenceRole: "supporting",
+  });
+
+  assert.deepEqual(pipelineHealthFindings({ cwd: fx.cwd, cycleId: CYCLE, now, sinceMs: 0 }), []);
 });
 
 test("a run labelled as measuring nothing whose primary table holds estimates is a contradiction", () => {

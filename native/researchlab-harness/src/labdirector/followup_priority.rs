@@ -316,6 +316,26 @@ pub(crate) fn pending_lane_action_priority(
         .and_then(|item| item.get("type"))
         .and_then(Value::as_str)
         .unwrap_or("");
+    let role = role_plan
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    // MEASURED ON cycle-a-20260919, 2026-10-27: pending director
+    // decisions that changed the analysis contract stayed behind Analysts 1280,
+    // 1300, and 1310. Each Analyst completed against the then-current contract,
+    // only for the older decision lane to run next and discard that handoff as
+    // stale. Settle director-owned recovery/pivot decisions before downstream
+    // analysis can spend a lane on the contract they may replace.
+    if role == "lab-director"
+        && matches!(
+            action_type,
+            "blocking_lane_recovery_planning"
+                | "gate_restart_followup"
+                | "lab_director_requery_followup"
+        )
+    {
+        return 0;
+    }
     // The engineer running a LabDirector simulation order is what every analyst
     // and runner in a simulator-sourced cycle is waiting on. MEASURED ON
     // cycle-b-20260918, 2026-09-18: with one worker slot, followup-engineer-01
@@ -375,7 +395,7 @@ pub(crate) fn pending_lane_action_priority(
     {
         0
     } else if action_type == "labdirector_comparator_validation_followup" {
-        0
+        1
     } else if target_rubric == "gate_independence" && action_type == "methods_followup" {
         1
     } else if target_rubric == "gate_independence" && action_type == "novelty_followup" {

@@ -84,10 +84,15 @@ function clearStaleAnalysisContext(plan, contractId) {
 // alike -- was told to author "exactly one new immutable validation run", and
 // did: 18 runners (458-475) executed 18 new scripts on the same sealed data and
 // wrote the same four estimates, 0.8992 [0.1585] first among them, every time.
-// The Rust harness runs no third primary execution of a contract
+// The Rust harness runs no further primary execution of a contract
 // (role_plan_refresh_03.rs, CONTRACT_MEASUREMENTS_BEFORE_HOLD); the Analyst is
 // told so, with the numbers, before it writes one.
-const CONTRACT_MEASUREMENTS_BEFORE_HOLD = 2;
+//
+// MEASURED ON cycle-a-20260919, 2026-10-26: after runner 779 had
+// measured the registered estimands, runner 780 repeated them and runner 781
+// was created to audit the two identical artifacts. Project the first result
+// immediately so later analysts work from the measurement instead of rerunning it.
+const CONTRACT_MEASUREMENTS_BEFORE_HOLD = 1;
 
 function parseCsv(text) {
   const rows = [];
@@ -178,7 +183,7 @@ function measurementInstruction(measurements) {
   if (measurements.length >= CONTRACT_MEASUREMENTS_BEFORE_HOLD) {
     return `${measuredBy} The same registered estimands on the same sealed data reproduce these numbers, and the harness runs no further primary execution of this measurement specification. Work from these measurements. Any new execution must be a supporting audit (analysis_evidence_role=supporting) that measures something the primary contrasts do not; if the measurement itself is wrong, say why in your result so the LabDirector can change the lead or its specification.`;
   }
-  return `${measuredBy} One independent reproduction of it may still run; author it only if your assignment needs one.`;
+  return measuredBy;
 }
 
 function bindAnalystPlan(plan, contract, recovery = null, measurements = []) {
@@ -188,7 +193,7 @@ function bindAnalystPlan(plan, contract, recovery = null, measurements = []) {
   const measuredBy = measurements.map((item) => item.lane_id);
   const contractBound = previous?.contract_id === contract.contract_id
       && JSON.stringify(plan.assigned_hypotheses) === JSON.stringify([contract.statement])
-      && plan.planner_metadata.analysis_contract_binding_version === 5
+      && plan.planner_metadata.analysis_contract_binding_version === 6
       && JSON.stringify((plan.planner_metadata.analysis_contract_measurements || []).map((item) => item.lane_id)) === JSON.stringify(measuredBy)
       && (contract.operational_spec || plan.followup_description?.includes("--register-spec"));
   const recoveryBound = !recovery || (plan.planner_metadata?.analysis_contract_recovery?.lane_id === recovery.lane_id
@@ -203,7 +208,10 @@ function bindAnalystPlan(plan, contract, recovery = null, measurements = []) {
   // MEASURED ON cycle-a-20260919, 2026-10-18: analysts 966 and 998
   // exactly followed their start-of-lane contracts, but those contracts changed
   // before completion and both finished handoffs were discarded as stale.
-  plan.planner_metadata.analysis_contract_binding_version = 5;
+  // MEASURED ON cycle-a-20260919, 2026-10-26: plans already bound
+  // after one measurement still invited a reproduction. Rebind them once so
+  // the existing result replaces that stale instruction.
+  plan.planner_metadata.analysis_contract_binding_version = 6;
   plan.planner_metadata.current_lead_under_analysis = contract;
   plan.planner_metadata.candidate_hypotheses = [{ family: contract.primary_family, statement: contract.statement }];
   // Old scientific assignments must not compete with the canonical contract.

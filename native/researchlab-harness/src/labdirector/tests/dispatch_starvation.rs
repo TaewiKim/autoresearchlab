@@ -167,6 +167,50 @@ fn post_bundle_analysis_outranks_gate_review_churn() {
 }
 
 #[test]
+fn contract_changing_director_work_precedes_the_measured_stale_analyst_handoffs() {
+    // MEASURED ON cycle-a-20260919, 2026-10-27: Analysts 1280,
+    // 1300, and 1310 followed their assigned current contracts, but older
+    // director lanes 1541, 1556, and 1563 ran immediately afterward, replaced
+    // those contracts, and produced three handoff_contract_stale discards.
+    // All six lanes shared the ordinary pipeline rank and were below the
+    // starvation threshold, so pending action priority decided the order.
+    let measured = [
+        (
+            "followup-analyst-1280",
+            json!({"role": "analyst", "action_type": "gate_restart_followup"}),
+            "followup-lab-director-1541",
+            json!({"role": "lab-director", "action_type": "blocking_lane_recovery_planning"}),
+        ),
+        (
+            "followup-analyst-1300",
+            json!({"role": "analyst", "action_type": "methods_followup"}),
+            "followup-lab-director-1556",
+            json!({"role": "lab-director", "action_type": "blocking_lane_recovery_planning"}),
+        ),
+        (
+            "followup-analyst-1310",
+            json!({"role": "analyst", "action_type": "labdirector_comparator_validation_followup"}),
+            "followup-lab-director-1563",
+            json!({
+                "role": "lab-director",
+                "action_type": "gate_restart_followup",
+                "planner_metadata": {"target_rubric": "hypothesis_strategy"}
+            }),
+        ),
+    ];
+
+    for (analyst_id, analyst, director_id, director) in measured {
+        assert_eq!(pending_lane_pipeline_unblock_rank(Some(&analyst)), 1);
+        assert_eq!(pending_lane_pipeline_unblock_rank(Some(&director)), 1);
+        assert!(
+            pending_lane_action_priority(Some(&director), false)
+                < pending_lane_action_priority(Some(&analyst), false),
+            "{director_id} must settle the contract before {analyst_id} uses it"
+        );
+    }
+}
+
+#[test]
 fn a_prepared_quota_lane_remains_dispatchable_after_resume() {
     // MEASURED ON cycle-a-20260919, 2026-09-30. The records read by
     // the health finding had followup-lab-director-195 `prepared` in both the

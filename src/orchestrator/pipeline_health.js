@@ -670,7 +670,16 @@ function repeatedResults({ lanes, sinceMs, now, config }) {
   for (const lane of lanes) {
     if (lane.role !== "lab-runner" || lane.final_status?.status !== "completed") continue;
     if (lane.completed_ms < Math.max(sinceMs, now - config.repeatedResultWindowHours * HOUR_MS) || lane.completed_ms > now) continue;
-    const rows = primaryContrastRows(laneResult(lane));
+    const result = laneResult(lane);
+    // MEASURED ON cycle-a-20260919, 2026-10-26: runners 783 and 784
+    // performed distinct supporting influence audits, but copied runner 782's
+    // verified primary_contrasts.csv into their audit artifacts for provenance.
+    // A copied reference table in explicitly supporting evidence is not another
+    // measurement of the primary estimands.
+    const binding = result?.analysis_contract_validation
+      || result?.validation_summary?.analysis_contract_validation;
+    if (binding?.evidence_role === "supporting") continue;
+    const rows = primaryContrastRows(result);
     const measured = (rows || []).map((row) => [
       String(row.contrast_id || ""),
       finiteNumber(row.estimate),
@@ -687,7 +696,7 @@ function repeatedResults({ lanes, sinceMs, now, config }) {
     const group = groups.get(key);
     group.lanes.push(lane.lane_id);
     group.newest = Math.max(group.newest, lane.completed_ms);
-    for (const sha of laneResult(lane)?.analysis_contract_validation?.executed_code_sha256 || []) group.scripts.add(sha);
+    for (const sha of result?.analysis_contract_validation?.executed_code_sha256 || []) group.scripts.add(sha);
   }
   const findings = [];
   for (const [key, group] of groups) {

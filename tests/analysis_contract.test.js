@@ -41,7 +41,7 @@ test("analysts re-check the live contract before submitting a handoff",()=>{
   // during each lane and their completed primary handoffs were discarded.
   const f=fixture(), c=currentAnalysisContract(f.root,"c"), p={planner_metadata:{}};
   assert.equal(bindAnalystPlan(p,c),true);
-  assert.equal(p.planner_metadata.analysis_contract_binding_version,5);
+  assert.equal(p.planner_metadata.analysis_contract_binding_version,6);
   assert.match(p.followup_description,/Immediately before writing the final handoff/);
   assert.match(p.followup_description,/--current/);
   assert.match(p.followup_description,/revise the handoff and frozen blueprint to match it before completing/);
@@ -71,7 +71,7 @@ test("pending analysts are rebound to regenerate incomplete primary contrast row
   assert.deepEqual(found.map(x=>x.lane_ids),[["followup-runner-347"]]);
   assert.deepEqual(repairQueuedAnalystContracts({cwd:f.cwd,cycleId:"c"}),["followup-analyst-866"]);
   const rebound=JSON.parse(fs.readFileSync(path.join(analyst,"role-plan.json")));
-  assert.equal(rebound.planner_metadata.analysis_contract_binding_version,5);
+  assert.equal(rebound.planner_metadata.analysis_contract_binding_version,6);
   assert.match(rebound.followup_description,/finite estimate, simultaneous_lower, and simultaneous_upper/);
   assert.match(rebound.followup_description,/never mix descriptive estimates with missing bounds/);
   assert.match(rebound.followup_description,/exactly one new immutable validation run/);
@@ -97,7 +97,7 @@ test("mixed comparators encoded by registered contrast IDs become canonical befo
   });
   const plan={planner_metadata:{}};
   assert.equal(bindAnalystPlan(plan,contract),true);
-  assert.equal(plan.planner_metadata.analysis_contract_binding_version,5);
+  assert.equal(plan.planner_metadata.analysis_contract_binding_version,6);
   assert.match(plan.followup_description,/contrast_comparators\[contrast_id\]/);
 });
 test("only verified outputs with the current contract bind, even under a family alias",()=>{
@@ -138,7 +138,7 @@ test("one pending analyst receives the measured current-contract execution failu
     const dir=path.join(f.root,"lanes","c",`followup-analyst-${id}`);
     f.write(path.join(dir,"lane-contract.json"),{role:"analyst"});
     f.write(path.join(dir,"role-plan.json"),{role:"analyst",action_type:action,assigned_hypotheses:[c.statement],
-      followup_description:"already current",planner_metadata:{analysis_contract:c,analysis_contract_binding_version:5,
+      followup_description:"already current",planner_metadata:{analysis_contract:c,analysis_contract_binding_version:6,
         ...(id==="939"?{review_action:{analysis_request:{analyst_handoff:{analysis_contract:{contract_id:"analysis:retired"}}}},
           failed_runner_context:{analysis_contract_validation:{contract_id:"analysis:retired",status:"verified"}}}:{})}});
   }
@@ -207,9 +207,9 @@ test("a first contract mismatch becomes a maintainer finding without requiring t
   assert.equal(found.length,1);
   assert.equal(found[0].contract_id,c.contract_id);
 });
-test("an analyst bound to a measured contract is told its numbers, and after two is not asked for a third run",()=>{
-  // MEASURED ON cycle-a-20260919, 2026-10-18: 18 runners executed
-  // contract 12daf336 and wrote the same four estimates each time.
+test("an analyst bound to one measured contract is told its numbers and not asked for a repeat",()=>{
+  // MEASURED ON cycle-a-20260919, 2026-10-26: runner 780 repeated
+  // runner 779's ten estimands before analysts were told the measurement existed.
   const { contractMeasurements } = require("../src/policy/analysis_contract");
   const f=fixture(), c=currentAnalysisContract(f.root,"c");
   const runner=(id,status)=>{
@@ -228,8 +228,9 @@ test("an analyst bound to a measured contract is told its numbers, and after two
   const p={planner_metadata:{}};
   assert.equal(bindAnalystPlan(p,c,null,once),true);
   assert.match(p.followup_description,/already available: verified execution followup-runner-458 \(p1=0\.8992 \[0\.1585, 1\.64\]/);
-  assert.match(p.followup_description,/exactly one new immutable validation run/);
-  assert.match(p.followup_description,/One independent reproduction/);
+  assert.doesNotMatch(p.followup_description,/exactly one new immutable validation run/);
+  assert.match(p.followup_description,/runs no further primary execution of this measurement specification/);
+  assert.doesNotMatch(p.followup_description,/One independent reproduction/);
   assert.equal(bindAnalystPlan(p,c,null,once),false);
 
   runner("followup-runner-459","verified");

@@ -802,6 +802,77 @@
     }
 
     #[test]
+    fn a_lead_its_own_fail_closed_invalid_design_can_be_replaced_at_once() {
+        // MEASURED ON cycle-a-20260919, 2026-10-26: runner 777
+        // completed the v1 validity gate with produced_evidence=false and
+        // not_estimable_design_invalid. After three gate rounds, three director
+        // decisions for the executable v2 order were still held behind v1.
+        let selected = lead_hold_now_ms() - 60_000;
+        let (_dir, paths, hypothesis_path) = lead_hold_setup(selected);
+        let mut incumbent = lead_hold_read(&hypothesis_path);
+        incumbent["dataset_or_accession"] = json!("directional_support_cell_ablation_v1");
+        incumbent["identification_strategy"] = json!({
+            "dataset_or_accession": "directional_support_cell_ablation_v1",
+            "validation_data_status": "materialized"
+        });
+        lead_hold_write(&hypothesis_path, incumbent);
+        for _ in 0..3 {
+            lead_hold_gate_decision(&paths);
+        }
+
+        lead_hold_tick();
+        let handoff = paths.runtime_root.join(
+            "lanes/cycle-test/followup-analyst-1308/handoff-validation-plan.json",
+        );
+        lead_hold_write(&handoff, json!({}));
+        lead_hold_runner(&paths, "followup-runner-777", &handoff, json!({
+            "blueprint_executions": [{
+                "status": "completed",
+                "produced_evidence": false,
+                "metrics": {
+                    "pass_fail": "fail",
+                    "resolution_status": "not_estimable_design_invalid"
+                }
+            }]
+        }));
+
+        let contract = test_contract("lab-director", PathBuf::from("task.md"));
+        let replacement = json!({
+            "status": "completed",
+            "extracted_json": {
+                "requery_decision": "uphold",
+                "rationale": "retain the family but replace its invalid control prospectively",
+                "selected_hypothesis": {
+                    "statement": "the twin-remote deletion design",
+                    "primary_family": "family_a",
+                    "dataset_or_accession": "directional_support_cell_ablation_v2"
+                },
+                "simulation_orders": [{
+                    "request_id": "directional_support_cell_ablation_v2",
+                    "simulator_backend": "mujoco",
+                    "output_path": ".research-lab/datasets/cycle-test/simulations/directional_support_cell_ablation_v2/episodes.csv"
+                }]
+            }
+        });
+        project_with_valid_landscape(&paths, &contract, &replacement).unwrap();
+        super::project_lab_director_simulation_orders(&paths, &contract, &replacement).unwrap();
+
+        let replaced = lead_hold_read(&hypothesis_path);
+        assert_eq!(replaced["statement"], json!("the twin-remote deletion design"));
+        assert_eq!(
+            replaced["lead_hold_released_by"],
+            json!("lead_design_invalidated_by_its_own_validation")
+        );
+        let orders =
+            crate::labdirector::latest_lab_director_simulation_orders(&paths, "cycle-test")
+                .unwrap();
+        assert_eq!(
+            orders[0]["request_id"],
+            json!("directional_support_cell_ablation_v2")
+        );
+    }
+
+    #[test]
     fn a_reviewed_selected_simulation_blocker_releases_the_lead_hold() {
         // MEASURED ON cycle-a-20260919, 2026-10-04: at
         // reproduction_anchor the selected competence-matching order returned
