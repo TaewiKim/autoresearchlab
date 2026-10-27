@@ -1103,14 +1103,14 @@ test("gate review still supersedes gatekeeper review when newer validation is ma
   writeJson(path.join(gatekeeperDir, "role-plan.json"), {
     role: "gatekeeper",
     action_type: "independent_gate_review_followup",
-    planner_metadata: { target_rubric: "novelty" },
+    planner_metadata: { target_rubric: "technical_quality" },
   });
   writeJson(path.join(gatekeeperDir, "final-status.json"), { status: "completed" });
   writeJson(path.join(gatekeeperDir, "result.json"), {
     output_last_message: JSON.stringify({
       verdict: "approve",
-      reviewer_focus_rubric: "novelty",
-      rubric: [{ name: "novelty", score: 96, reasons: ["approved before the newest failing runner"], applicable: true }],
+      reviewer_focus_rubric: "technical_quality",
+      rubric: [{ name: "technical_quality", score: 96, reasons: ["approved before the newest failing runner"], applicable: true }],
       major_objections: [],
     }),
   });
@@ -1577,7 +1577,10 @@ test("gate review scopes stale audit blockers away after LabDirector pivots curr
   fs.rmSync(cwd, { recursive: true, force: true });
 });
 
-function gateWithNewerRunner(tag, newerRunner) {
+// `focus` is the rubric the earlier gatekeeper review was focused on. A rubric
+// that judges the evidence (the default) is re-reviewed when a newer run lands;
+// novelty, which judges the claim against the literature, is not.
+function gateWithNewerRunner(tag, newerRunner, focus = "technical_quality") {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `researchlab-gate-${tag}-`));
   const root = path.join(cwd, ".research-lab");
   const cycleId = `cycle-gate-${tag}`;
@@ -1589,6 +1592,8 @@ function gateWithNewerRunner(tag, newerRunner) {
     selected_hypothesis: { statement: "Receding-horizon replanning preserves Diffusion Policy success under local-support removal." },
   });
   const at = (offsetMs) => new Date(Date.now() + offsetMs);
+  // The lead was selected before the review, so only the validation rule is in play.
+  fs.utimesSync(path.join(root, "state", `${cycleId}-lab-director-hypothesis.json`), at(-300_000), at(-300_000));
   // 1. A completed, passing runner.
   // Both runners carry the lead's statement, as the live runners do: that sends
   // selection down the scored path, where the newest matching run wins.
@@ -1601,14 +1606,14 @@ function gateWithNewerRunner(tag, newerRunner) {
   fs.utimesSync(path.join(passedDir, "result.json"), at(-120_000), at(-120_000));
   // 2. A gatekeeper that reviewed it.
   writeJson(path.join(gatekeeperDir, "role-plan.json"), {
-    role: "gatekeeper", action_type: "independent_gate_review_followup", planner_metadata: { target_rubric: "novelty" },
+    role: "gatekeeper", action_type: "independent_gate_review_followup", planner_metadata: { target_rubric: focus },
   });
   writeJson(path.join(gatekeeperDir, "final-status.json"), { status: "completed" });
   writeJson(path.join(gatekeeperDir, "result.json"), {
     output_last_message: JSON.stringify({
       verdict: "reject",
-      reviewer_focus_rubric: "novelty",
-      rubric: [{ name: "novelty", score: 64, reasons: ["Receding-horizon replanning novelty is not established over prior lookup work."], applicable: true }],
+      reviewer_focus_rubric: focus,
+      rubric: [{ name: focus, score: 64, reasons: ["Receding-horizon replanning novelty is not established over prior lookup work."], applicable: true }],
       major_objections: ["Receding-horizon replanning and Diffusion Policy novelty is not established over prior lookup work."],
     }),
   });
@@ -1677,4 +1682,24 @@ test("a newer run that validly falsified the lead still forces a fresh review", 
   });
   assert.equal(output.review.latest_validation_lane_id, "followup-runner-66");
   assert.equal(supersededByValidation(output), 1, "a genuine falsification no longer supersedes the stale review");
+});
+
+test("a novelty review stands across a newer validation; the rubrics that judge the evidence are re-reviewed", () => {
+  // MEASURED ON cycle-a-20260919, 2026-10-26: a new runner result on an
+  // unchanged lead and contract set aside every review. Novelty judges the claim
+  // against the literature, which a new measurement does not change: a novelty of
+  // 82 went back to 0 and had to be bought again.
+  const materiallyNegative = {
+    status: "failed",
+    validation_summary: {
+      overall_status: "failed", blueprints_total: 1, blueprints_passed: 0, blueprints_failed: 1,
+      failed_checks: ["preregistered-endpoint"],
+      handoff_check_resolutions: [{ check_id: "preregistered-endpoint", status: "failed", valid_falsification_result: true }],
+    },
+  };
+  const novelty = gateWithNewerRunner("novelty-stands", materiallyNegative, "novelty");
+  assert.equal(supersededByValidation(novelty), 0, "a new measurement erased a novelty review");
+  assert.equal(novelty.review.gatekeeper_pending_rubrics.includes("novelty"), false, "novelty would be bought again");
+  const evidence = gateWithNewerRunner("evidence-redone", materiallyNegative, "technical_quality");
+  assert.equal(supersededByValidation(evidence), 1, "a review of the old evidence stood against a new measurement");
 });

@@ -49,6 +49,7 @@ const {
   buildLabDirectorBlockerReviewActions,
   compactGateValidationResults,
   leadProtectionPrefix,
+  retainedStrengthsPrefix,
   takeCandidateHypotheses,
   takeOpenValidationGaps,
 } = require("./actions");
@@ -672,7 +673,10 @@ function buildGateReview({
             // kept telling directors to resume a falsified lead, and the readers
             // treat a non-empty directive as active.
             try {
-              const directive = leadProtectionPrefix(decision) || "";
+              // The ledger's protection, then what the reviewers already cleared:
+              // this file is how the dispatchers that build their own director
+              // lanes (the native recovery lanes) learn both.
+              const directive = (leadProtectionPrefix(decision) || "") + retainedStrengthsPrefix(aggregateReview?.rubric);
               writeJson(path.join(runtimeRoot(cwd), "state", `${cycleId}-lead-protection.json`), {
                 ts: new Date().toISOString(),
                 cycle_id: cycleId,

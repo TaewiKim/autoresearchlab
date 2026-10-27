@@ -835,8 +835,17 @@ function filterSupersededGatekeeperReviews(parsedReviews, progressSignals, curre
       && progressSignals?.latestValidationLaneId
       && review.briefed_validation_lane_id !== progressSignals.latestValidationLaneId
       && !gatekeeperReviewSearchText(review).includes(progressSignals.latestValidationLaneId);
-    const supersededByNewerValidation = supersededValidationBinding
-      || isSupersededByNewerValidationEvidence(review, progressSignals);
+    // Novelty judges the claim against the literature, and a newer measurement
+    // of the same claim does not change the literature: its review stands
+    // across new validation, and is still set aside when the lead, its contract
+    // or its family change (above and below). The rubrics that judge the
+    // evidence -- technical quality, reproducibility, clarity of the evidence
+    // chain, impact of the validated finding -- are re-reviewed, and only they.
+    // MEASURED ON cycle-a-20260919, 2026-10-26: a new runner result on
+    // an unchanged lead and contract set aside every review, and a novelty of 82
+    // went back to 0 and was bought again.
+    const supersededByNewerValidation = review.focus_rubric !== "novelty"
+      && Boolean(supersededValidationBinding || isSupersededByNewerValidationEvidence(review, progressSignals));
     // No partial credit for a review of a different lead: partial credit exists
     // for a review that IS about this lead but predates its latest restatement.
     const currentHypothesisPartialCredit = supersededCurrentHypothesis && !currentIdentity?.dataset_keys?.length && !supersededForeignAccession && !supersededByNewerValidation && !supersededBriefedLead

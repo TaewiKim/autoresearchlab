@@ -390,6 +390,34 @@ function pregateReportingRole(preferredRole, type) {
   return "analyst";
 }
 
+// What the reviewers already cleared, as the text the LabDirector reads.
+//
+// The director was told the score, the rubric to raise and the objections --
+// never which rubrics were already at the bar or what earned them, so a
+// refinement could not know what not to touch. MEASURED ON
+// cycle-a-20260919, 2026-10-17/18: a lead reached novelty 78 /
+// technical_quality 84 / reproducibility 92 / clarity 86 with only impact (67)
+// short, and was replaced rather than improved at the one rubric that lacked.
+// Rubrics with no reviewer of their own yet are not scores, and are left out.
+function retainedStrengthsPrefix(rubric) {
+  const rows = asArray(rubric).filter((row) =>
+    row && typeof row === "object" && row.applicable !== false
+    && row.focused_review_missing !== true && Number.isFinite(Number(row.score)));
+  const cleared = rows.filter((row) => Number(row.score) >= GATE_THRESHOLD);
+  if (!cleared.length) return "";
+  const below = rows.filter((row) => Number(row.score) < GATE_THRESHOLD);
+  const basis = (row) => asArray(row.reasons).map((text) => String(text).trim()).filter(Boolean)
+    .slice(0, 2).map((text) => compactText(text, 220)).join(" | ") || "no basis stated";
+  return (
+    `RUBRICS ALREADY AT THE BAR (${GATE_THRESHOLD}) -- KEEP WHAT EARNED THEM: ` +
+    cleared.map((row) => `${row.name}=${row.score} (reviewer: ${basis(row)})`).join("; ") + ". " +
+    (below.length ? `The work left is ${below.map((row) => `${row.name}=${row.score}`).join(", ")}. ` : "") +
+    "Improve the lead in place. Do not change the claim, estimands, comparators, data or validity gates " +
+    "those scores rest on unless the evidence forces it; if you do, name the cleared rubric you are " +
+    "putting at risk and why. A cleared rubric that falls again is a regression, not a fresh start. "
+  );
+}
+
 // The ledger's protection, as the text the LabDirector reads.
 //
 // Extracted so it can be applied to EVERY requery routed to the director. It
@@ -644,6 +672,7 @@ function authoritativeGateFollowupActions({
   // was protected. Anything routed to lab-director as a requery now carries the
   // same lead identity and the same anti-churn rule, whoever proposed it.
   const leadProtection = leadProtectionPrefix(leadSupersession);
+  const retainedStrengths = retainedStrengthsPrefix(aggregateReview?.rubric);
   const isDirectorRequery = (action) =>
     String(action?.preferred_role || "") === "lab-director" ||
     String(action?.type || "").includes("requery") ||
@@ -680,9 +709,11 @@ function authoritativeGateFollowupActions({
       description: routedDescription,
     };
     if (leadProtection && isDirectorRequery(proposed)) {
-      proposed.description = leadProtection + proposed.description;
+      proposed.description = leadProtection + retainedStrengths + proposed.description;
       proposed.lead_supersession = leadSupersession || null;
       proposed.validation_results = establishedValidationResults;
+    } else if (retainedStrengths && isDirectorRequery(proposed)) {
+      proposed.description = retainedStrengths + proposed.description;
     }
     actions.push(proposed);
     actions[actions.length - 1].priority_score = gateActionPriorityScore(actions[actions.length - 1]);
@@ -760,6 +791,7 @@ function authoritativeGateFollowupActions({
       lead_supersession: leadSupersession || null,
       description:
         antiThrashPrefix +
+        retainedStrengths +
         claimScopeRule +
         (falsificationReplacementPending
           ? "respond to the independent gate review by recording the replacement method and its accountable research question. "
@@ -867,6 +899,8 @@ module.exports = {
   pregateReportingRole,
 
   buildChallengeQuestions,
+
+  retainedStrengthsPrefix,
 
   buildGateFollowupActions,
 
