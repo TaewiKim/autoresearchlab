@@ -73,6 +73,25 @@ const RUBRIC_FIELDS = [
   "rubric_scores",
 ];
 
+// Rubrics whose score is NOT their own reviewer's. The gate takes each rubric
+// from the gatekeeper focused on it; a rubric nobody focused on yet is filled
+// from another reviewer's cross-rubric row and listed as pending, and a review
+// with any pending rubric cannot pass.
+// MEASURED ON cycle-a-20260919, 2026-10-26: a round recorded
+// 'score 85, pass false' -- the five numbers of one impact-focused gatekeeper,
+// who had challenged it (impact 78) -- while no novelty, technical-quality,
+// reproducibility or clarity reviewer had reported on that lead. The history
+// carried the 85 and nothing saying it was a quarter of a review, and it read
+// as a gate that should have passed.
+function unreviewedRubrics(review) {
+  const names = new Set(asArray(review?.gatekeeper_pending_rubrics).map((name) => String(name)));
+  const rubric = Array.isArray(review?.rubric) ? review.rubric : [];
+  for (const row of rubric) {
+    if (row && typeof row === "object" && row.focused_review_missing === true && row.name) names.add(String(row.name));
+  }
+  return [...names].sort();
+}
+
 function rubricSnapshot(review) {
   const rubric = RUBRIC_FIELDS.map((field) => review?.[field]).find(
     (value) => Array.isArray(value) ? value.length : value && typeof value === "object",
@@ -170,6 +189,8 @@ function fingerprint(entry) {
     entry.subject,
     entry.evidence_revision,
     entry.rubric,
+    entry.unreviewed_rubrics,
+    entry.mode,
   ]);
 }
 
@@ -219,6 +240,10 @@ function recordReviewSnapshot({ root, cycleId, kind, review }) {
       rubric: scores,
       // Which of those numbers were accounted for by stated reasons.
       rubric_accounted: accounted,
+      // Gate rounds only: which rubrics had no reviewer of their own yet (a
+      // round with any of these cannot pass), and the gate's verdict.
+      unreviewed_rubrics: kind === "gate-review" ? unreviewedRubrics(review) : undefined,
+      mode: kind === "gate-review" ? (review.mode || review.decision_mode || undefined) : undefined,
     };
     const filePath = historyPath(root, cycleId, kind);
     if (lastFingerprint(filePath) === fingerprint(entry)) return null;

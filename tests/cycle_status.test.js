@@ -281,3 +281,25 @@ test("a cycle with no usage events reports tokens as not-yet, and does not throw
   assert.equal(tokens.verdict, VERDICT.ABSENT);
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test("a gate round with rubrics nobody reviewed yet is marked partial and does not set 'best'", () => {
+  // MEASURED ON cycle-a-20260919, 2026-10-26: 'score 85, pass false' was
+  // one impact-focused gatekeeper's five numbers; the other four rubrics had no
+  // reviewer of their own, so the round could not pass, and nothing said so.
+  const root = emptyCycle();
+  const rows = [
+    { ts: "2026-10-26T10:00:00Z", kind: "gate-review", score: 40, pass: false, subject: "lead c", rubric: { novelty: 60, technical_quality: 20, reproducibility: 10 } },
+    { ts: "2026-10-26T18:00:00Z", kind: "gate-review", score: 50, pass: false, subject: "lead a", unreviewed_rubrics: [], mode: "reject", rubric: { novelty: 52, technical_quality: 34, reproducibility: 42 } },
+    { ts: "2026-10-26T18:41:00Z", kind: "gate-review", score: 85, pass: false, subject: "lead b", unreviewed_rubrics: ["clarity", "novelty", "reproducibility", "technical_quality"], mode: "challenge", rubric: { novelty: 84, technical_quality: 89, reproducibility: 88 } },
+  ];
+  fs.writeFileSync(path.join(root, "state", `${CYCLE}-gate-review-history.jsonl`), rows.map((row) => JSON.stringify(row)).join(String.fromCharCode(10)) + String.fromCharCode(10), "utf8");
+  const gate = cycleStatus({ root, cycleId: CYCLE }).checks.find((item) => item.id === "gate");
+  assert.equal(gate.detail.rounds_whole, 1);
+  assert.equal(gate.detail.rounds_partial, 1);
+  assert.equal(gate.detail.rounds_unrecorded, 1);
+  assert.deepEqual(gate.detail.latest_unreviewed, ["clarity", "novelty", "reproducibility", "technical_quality"]);
+  // The partial round's 84/89/88 is not 'best': only the whole round counts.
+  assert.deepEqual(gate.detail.best_by_rubric, { novelty: 52, technical_quality: 34, reproducibility: 42 });
+  assert.equal(gate.detail.best_basis, "whole rounds");
+  fs.rmSync(root, { recursive: true, force: true });
+});

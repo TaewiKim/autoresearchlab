@@ -271,8 +271,16 @@ function gateCheck(root, cycleId) {
       return check("gate", "the gate", VERDICT.ABSENT, { gate_passed: review.gate_passed ?? null }, gateHistoryPath,
         "no gate round yet");
     }
+    // A round whose rubrics did not all have a reviewer of their own is a
+    // fraction of a review: its numbers are one reviewer's, and it cannot pass.
+    // 'Best' is taken over whole rounds where the history says which they are;
+    // older rounds do not say.
+    const isWhole = (entry) => Array.isArray(entry.unreviewed_rubrics) && entry.unreviewed_rubrics.length === 0;
+    const isPartial = (entry) => Array.isArray(entry.unreviewed_rubrics) && entry.unreviewed_rubrics.length > 0;
+    const whole = rounds.filter(isWhole);
+    const basis = whole.length ? whole : rounds;
     const best = {};
-    for (const entry of rounds) {
+    for (const entry of basis) {
       for (const [rubric, score] of Object.entries(entry.rubric || {})) {
         if (Number.isFinite(score) && !(best[rubric] >= score)) best[rubric] = score;
       }
@@ -280,6 +288,12 @@ function gateCheck(root, cycleId) {
     const last = rounds[rounds.length - 1];
     return check("gate", "the gate", VERDICT.OK, {
       gate_rounds: rounds.length,
+      rounds_whole: whole.length,
+      rounds_partial: rounds.filter(isPartial).length,
+      rounds_unrecorded: rounds.filter((entry) => !Array.isArray(entry.unreviewed_rubrics)).length,
+      latest_unreviewed: Array.isArray(last.unreviewed_rubrics) ? last.unreviewed_rubrics : null,
+      latest_mode: last.mode || null,
+      best_basis: whole.length ? "whole rounds" : "all rounds (older rounds do not record which rubrics were reviewed)",
       best_by_rubric: best,
       distinct_leads: new Set(rounds.map((entry) => entry.subject).filter(Boolean)).size,
       latest_score: last.score ?? null,
