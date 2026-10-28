@@ -231,3 +231,37 @@ test("a plateaued lead still permits an ordinary pivot", () => {
   assert.equal(progress.leadStallKind(worked, 6, undefined, 57), "plateau");
   assert.equal(leadProtectionPrefix({ decision: "allow", reason: "lead_stalled_pivot_permitted" }), "");
 });
+
+test("an evidence review made before the lead was selected, for a contract it never saw, is set aside once", () => {
+  // MEASURED ON cycle-a-20260919, 2026-10-28: a lead selected at 18:28 with
+  // a contract no runner had executed was judged by five rejections made 4 to 13
+  // days earlier (reproducibility 12 from 10-15), because the lead KEY is shared by
+  // every incarnation of the family. Nothing was pending, so nothing was re-requested.
+  const identity = {
+    lead_key: "hyp:27cb", analysis_contract_id: "analysis:6878", selected_at_ms: 10_000, source_mtime: 500, primary_text: "x",
+  };
+  const made = (laneId, focus, madeAt, contract = null) => ({
+    ...review(laneId, "hyp:27cb"), focus_rubric: focus, source_mtime: madeAt, briefed_analysis_contract_id: contract,
+    rubric: [{ name: focus, score: 12, applicable: true }],
+  });
+  const out = split([
+    made("gk-repro-old", "reproducibility", 1_000),
+    made("gk-impact-old", "impact", 2_000),
+    made("gk-novelty-old", "novelty", 1_000),
+    made("gk-tech-same-contract", "technical_quality", 1_000, "analysis:6878"),
+    made("gk-clarity-after", "clarity", 15_000),
+  ], identity);
+  assert.deepEqual(out.supersededReviews.map((item) => item.lane_id).sort(), ["gk-impact-old", "gk-repro-old"]);
+  assert.ok(out.supersededReviews.every((item) => item.superseded_kind === "superseded_pre_selection_review"));
+  assert.match(out.supersededReviews[0].reason, /made before this lead was selected/);
+  // Novelty judges the claim, a review of the same contract is the same analysis, a review
+  // made after the selection is current: all three stand.
+  assert.deepEqual(out.activeReviews.map((item) => item.lane_id).sort(), ["gk-clarity-after", "gk-novelty-old", "gk-tech-same-contract"]);
+  // Once: the review that replaces one is made after the selection, so it is not set aside in its turn.
+  const again = split([made("gk-repro-new", "reproducibility", 12_000)], identity);
+  assert.equal(again.supersededReviews.length, 0);
+
+  // Without a contract on the lead, or without a selection time, nothing is judged by this rule.
+  assert.equal(split([made("gk-repro-old", "reproducibility", 1_000)], { ...identity, analysis_contract_id: null }).supersededReviews.length, 0);
+  assert.equal(split([made("gk-repro-old", "reproducibility", 1_000)], { ...identity, selected_at_ms: 0 }).supersededReviews.length, 0);
+});

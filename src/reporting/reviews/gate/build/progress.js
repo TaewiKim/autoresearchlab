@@ -453,6 +453,10 @@ function currentHypothesisIdentity({ root, cycleId, summary }) {
   return {
     source_path: fs.existsSync(hypothesisPath) ? hypothesisPath : null,
     source_mtime: mtime,
+    // When this lead was SELECTED -- set when the lead's identity changes and
+    // kept when the director upholds it and rewords it, unlike the file's
+    // modification time, which moves with every restatement.
+    selected_at_ms: Number(currentHypothesis.selected_at_epoch_ms) || 0,
     accessions,
     dataset_keys: [...datasetKeys([
       currentHypothesis.selected_hypothesis?.dataset_or_accession,
@@ -803,6 +807,36 @@ function isBriefedOnSupersededLead(review, currentIdentity) {
   return briefed !== current;
 }
 
+// A review of the evidence, made before this lead was selected and before it had
+// the analysis contract it has now, is a review of something this contract never
+// ran. The lead KEY is shared by every incarnation of one family, so such a review
+// is matched to the lead again whenever the family is revisited, and it stands
+// until something newer overrides it -- and nothing is requested for a rubric
+// that is not pending.
+//
+// MEASURED ON cycle-a-20260919, 2026-10-28: a lead selected at 18:28 with
+// a contract no runner had executed was judged by five rejections made 4 to 13
+// days earlier (reproducibility 12 from 10-15), the gate read 37, nothing was
+// pending, and the director was handed those scores as the lead's state.
+//
+// Only unstamped reviews: one briefed on a contract is matched by the contract,
+// so a review of the very same analysis is kept, high or low. Novelty is exempt
+// (it judges the claim against the literature, not the evidence), and a review
+// made after the selection is current by construction, so this cannot repeat.
+const EVIDENCE_RUBRICS_RECHECKED_AT_SELECTION = new Set([
+  "technical_quality", "reproducibility", "clarity", "impact",
+  "consort_reporting_completeness", "strobe_reporting_completeness",
+]);
+
+function isPreSelectionEvidenceReview(review, currentIdentity) {
+  if (!currentIdentity?.analysis_contract_id) return false;
+  if (!currentIdentity.selected_at_ms) return false;
+  if (!EVIDENCE_RUBRICS_RECHECKED_AT_SELECTION.has(String(review?.focus_rubric || ""))) return false;
+  if (String(review?.briefed_analysis_contract_id || "").trim()) return false;
+  const madeAt = Number(review?.source_mtime || 0);
+  return madeAt > 0 && madeAt < currentIdentity.selected_at_ms;
+}
+
 function unboundGatekeeperRubricsForRebind(reviews, currentIdentity) {
   const current = String(currentIdentity?.lead_key || "").trim();
   if (!current) return [];
@@ -826,6 +860,7 @@ function filterSupersededGatekeeperReviews(parsedReviews, progressSignals, curre
   const supersededReviews = [];
   for (const review of parsedReviews || []) {
     const supersededBriefedLead = isBriefedOnSupersededLead(review, currentIdentity);
+    const supersededPreSelection = isPreSelectionEvidenceReview(review, currentIdentity);
     const supersededSetup = isSupersededSetupGatekeeperReview(review, progressSignals);
     const supersededEightGene = isSupersededPublishedEightGeneGatekeeperReview(review, progressSignals, currentIdentity);
     const supersededForeignAccession = isSupersededForeignAccessionGatekeeperReview(review, currentIdentity);
@@ -848,7 +883,7 @@ function filterSupersededGatekeeperReviews(parsedReviews, progressSignals, curre
       && Boolean(supersededValidationBinding || isSupersededByNewerValidationEvidence(review, progressSignals));
     // No partial credit for a review of a different lead: partial credit exists
     // for a review that IS about this lead but predates its latest restatement.
-    const currentHypothesisPartialCredit = supersededCurrentHypothesis && !currentIdentity?.dataset_keys?.length && !supersededForeignAccession && !supersededByNewerValidation && !supersededBriefedLead
+    const currentHypothesisPartialCredit = supersededCurrentHypothesis && !currentIdentity?.dataset_keys?.length && !supersededForeignAccession && !supersededByNewerValidation && !supersededBriefedLead && !supersededPreSelection
       ? alignedCurrentHypothesisReviewReason(review, currentIdentity)
       : null;
     if (currentHypothesisPartialCredit) {
@@ -860,7 +895,7 @@ function filterSupersededGatekeeperReviews(parsedReviews, progressSignals, curre
       });
       continue;
     }
-    if (supersededBriefedLead || supersededSetup || supersededEightGene || supersededForeignAccession || supersededCurrentHypothesis || supersededByNewerValidation) {
+    if (supersededBriefedLead || supersededPreSelection || supersededSetup || supersededEightGene || supersededForeignAccession || supersededCurrentHypothesis || supersededByNewerValidation) {
       supersededReviews.push({
         lane_id: review.lane_id || null,
         focus_rubric: review.focus_rubric || null,
@@ -868,6 +903,8 @@ function filterSupersededGatekeeperReviews(parsedReviews, progressSignals, curre
         score: averageApplicableRubricScore(review.rubric),
         superseded_kind: supersededBriefedLead
           ? "superseded_briefed_lead_review"
+          : supersededPreSelection
+          ? "superseded_pre_selection_review"
           : supersededForeignAccession
           ? "superseded_foreign_accession_review"
           : supersededEightGene
@@ -880,6 +917,8 @@ function filterSupersededGatekeeperReviews(parsedReviews, progressSignals, curre
         reason:
           supersededBriefedLead
             ? `superseded briefed-lead review: this reviewer was briefed on lead ${review.briefed_lead_key}, the gate is now judging ${currentIdentity?.lead_key}`
+            : supersededPreSelection
+            ? `superseded pre-selection review: made before this lead was selected (${new Date(currentIdentity.selected_at_ms).toISOString()}) and before the analysis contract it now has; it judged evidence this contract never ran`
             : supersededForeignAccession
             ? `superseded foreign-accession review: review only references accessions outside the current lead (${(currentIdentity?.accessions || []).join(", ")})`
             : supersededEightGene
