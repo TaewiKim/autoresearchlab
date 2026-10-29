@@ -158,3 +158,76 @@ test("status and the clues command read the register, folding in decisions not y
   assert.equal(JSON.parse(json).summary.total, 2);
   fs.rmSync(cwd, { recursive: true, force: true });
 });
+
+test("at most six live clues can be high: a new one is recorded as medium, a promotion is refused, and the director is told", () => {
+  // MEASURED ON cycle-a-20260919, 2026-10-29: 30 of 32 clues were high, and
+  // asked to re-rank the director did not, so `high` is a budget the harness keeps.
+  const root = fixture();
+  const mk = (n, importance = "high") => ({ op: "add", kind: "idea", statement: `Clue number ${n} -- a long enough statement to be a clue.`, importance });
+  directorLane(root, "followup-lab-director-1", [1, 2, 3, 4, 5, 6].map((n) => mk(n)), "2026-10-29T01:00:00Z");
+  directorLane(root, "followup-lab-director-2", [mk(7), mk(8, "low")], "2026-10-29T02:00:00Z");
+  clues.applyDirectorClueUpdates({ root, cycleId: CYCLE });
+  let register = clues.readRegister(root, CYCLE);
+  const byStatement = (n) => register.clues.find((clue) => clue.statement.startsWith(`Clue number ${n} `));
+  assert.equal(register.clues.filter((clue) => clue.importance === "high").length, 6);
+  assert.equal(byStatement(7).importance, "medium", "the seventh high was recorded, as medium");
+  assert.equal(byStatement(8).importance, "low");
+  assert.match(register.feedback.find((item) => item.kind === "capped").text, /recorded as medium: 6 live clues are already high/);
+
+  // Promoting one to high with no room is refused, and the director is told who holds the slots.
+  directorLane(root, "followup-lab-director-3", [{ op: "update", clue_id: byStatement(8).clue_id, importance: "high" }], "2026-10-29T03:00:00Z");
+  const refusal = clues.applyDirectorClueUpdates({ root, cycleId: CYCLE });
+  assert.equal(refusal.refused.length, 1);
+  register = clues.readRegister(root, CYCLE);
+  assert.equal(byStatement(8).importance, "low");
+  const told = register.feedback.find((item) => item.kind === "refused");
+  assert.match(told.text, /could not be made high: 6 live clues already are \(c-[0-9a-f]{8} \(Clue number 1/);
+
+  // Freeing a slot and filling it in the same lane works, in either order.
+  directorLane(root, "followup-lab-director-4", [
+    { op: "update", clue_id: byStatement(8).clue_id, importance: "high" },
+    { op: "update", clue_id: byStatement(1).clue_id, importance: "medium" },
+  ], "2026-10-29T04:00:00Z");
+  clues.applyDirectorClueUpdates({ root, cycleId: CYCLE });
+  register = clues.readRegister(root, CYCLE);
+  assert.equal(byStatement(8).importance, "high");
+  assert.equal(byStatement(1).importance, "medium");
+  assert.equal(register.clues.filter((clue) => clue.importance === "high").length, 6);
+
+  // Resolving a high clue frees its slot.
+  directorLane(root, "followup-lab-director-5", [
+    { op: "update", clue_id: byStatement(2).clue_id, status: "resolved", note: "answered by runner 800" },
+    { op: "update", clue_id: byStatement(7).clue_id, importance: "high" },
+  ], "2026-10-29T05:00:00Z");
+  clues.applyDirectorClueUpdates({ root, cycleId: CYCLE });
+  register = clues.readRegister(root, CYCLE);
+  assert.equal(byStatement(7).importance, "high");
+  assert.equal(register.clues.filter((clue) => clue.status === "open" && clue.importance === "high").length, 6);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("a register that predates the budget is brought within it: clues in use keep high, then the most recently touched", () => {
+  const root = fixture();
+  const at = (hour) => `2026-10-2${hour < 10 ? "8" : "9"}T${String(hour % 24).padStart(2, "0")}:00:00Z`;
+  const clue = (n, status, hour) => ({
+    clue_id: `c-${String(n).padStart(8, "0")}`, kind: "idea", statement: `Legacy clue ${n} -- a long enough statement to be a clue.`, why_it_matters: "", evidence_refs: [],
+    lead_key: null, importance: "high", status, first_recorded_by: "followup-lab-director-1", first_recorded_at: at(hour), last_updated_by: "followup-lab-director-1",
+    last_updated_at: at(hour), history: [],
+  });
+  // Ten live highs: two in use (the oldest of all), eight open from the 1st to the 8th hour.
+  const legacy = [clue(1, "in_use", 0), clue(2, "in_use", 1), ...[3, 4, 5, 6, 7, 8, 9, 10].map((n) => clue(n, "open", n))];
+  fs.writeFileSync(clues.cluesPath(root, CYCLE), JSON.stringify({ cycle_id: CYCLE, updated_at: "2026-10-28T00:00:00Z", clues: legacy, applied_lanes: {} }));
+  const result = clues.applyDirectorClueUpdates({ root, cycleId: CYCLE, now: new Date("2026-10-29T06:00:00Z") });
+  assert.equal(result.changed, true);
+  const register = clues.readRegister(root, CYCLE);
+  const kept = register.clues.filter((item) => item.importance === "high").map((item) => item.clue_id).sort();
+  // The two in use, and the four most recently touched open ones (7, 8, 9, 10).
+  assert.deepEqual(kept, ["c-00000001", "c-00000002", "c-00000007", "c-00000008", "c-00000009", "c-00000010"].sort());
+  const demoted = register.clues.find((item) => item.clue_id === "c-00000003");
+  assert.equal(demoted.importance, "medium");
+  assert.match(demoted.history.at(-1).change, /more than 6 live clues were high/);
+  assert.equal(register.feedback.filter((item) => item.kind === "demoted").length, 4);
+  // Doing it again changes nothing.
+  assert.equal(clues.applyDirectorClueUpdates({ root, cycleId: CYCLE }).changed, false);
+  fs.rmSync(root, { recursive: true, force: true });
+});

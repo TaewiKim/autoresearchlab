@@ -1233,24 +1233,31 @@ fn research_clues_payload(paths: &AppPaths, cycle_id: &str) -> Value {
         .filter(|clue| clue.get("importance").and_then(Value::as_str) == Some("high"))
         .count();
     // MEASURED ON cycle-a-20260919, 2026-10-29: 30 of the 32 clues the
-    // director had recorded were marked high, so the register could not say which
-    // mattered. The importance is the director's to give; when it has stopped
-    // telling clues apart the director is told so, with the counts, and re-ranks.
-    let importance_note = if live >= 8 && high * 10 > live * 7 {
-        json!(format!(
-            "{high} of your {live} live clues are marked `high`, so `high` no longer tells them apart. `high` is for a clue that would change which lead you choose or how you refine it; re-rank: update the ones that no longer would to `medium` or `low` (an `update` with the clue_id and the new `importance`), and keep `high` for the few that still do."
-        ))
-    } else {
-        Value::Null
-    };
+    // director had recorded were marked high, and asked to re-rank it did not. The
+    // owner set a budget (src/reporting/research_clues.js keeps it): at most
+    // `high_cap` live clues are high. What the harness did about a request that
+    // would break it (recorded as medium, refused, or demoted) is in `feedback`,
+    // so the director learns its update was not applied as written.
+    let high_cap = register
+        .as_ref()
+        .and_then(|value| value.get("max_high_live"))
+        .and_then(Value::as_u64)
+        .unwrap_or(6);
+    let feedback = register
+        .as_ref()
+        .and_then(|value| value.get("feedback"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     json!({
         "register": view,
         "clues_total": clues.len(),
         "clues_live": live,
         "clues_live_high": high,
-        "importance_note": importance_note,
+        "high_cap": high_cap,
+        "feedback": feedback,
         "recorded_in": format!(".research-lab/state/{cycle_id}-research-clues.json"),
-        "how_to_use": "Your clue register, kept whatever happens to the lead. Read it before you choose, refine, replace or conclude. Record what this round taught that the next lead should not have to find out again in `research_clue_updates` (add a clue, or update one by `clue_id`); resolving or retiring a clue needs a note saying why. See research_clues_duty.",
+        "how_to_use": "Your clue register, kept whatever happens to the lead. Read it before you choose, refine, replace or conclude. Record what this round taught that the next lead should not have to find out again in `research_clue_updates` (add a clue, or update one by `clue_id`); resolving or retiring a clue needs a note saying why. At most `high_cap` live clues can be `high`: a new one that does not fit is recorded as medium, and making another high is refused until you lower one -- `feedback` lists what was not applied as you wrote it, and why. See research_clues_duty.",
     })
 }
 
@@ -1464,36 +1471,32 @@ mod rebuttal_and_alternate_pilot_tests {
         assert_eq!(filled["register"].as_array().unwrap().len(), 2);
         assert_eq!(filled["recorded_in"], json!(".research-lab/state/c-research-clues.json"));
         assert_eq!(filled["clues_live_high"], json!(1));
-        assert!(filled["importance_note"].is_null(), "two live clues need no re-ranking");
+        assert_eq!(filled["high_cap"], json!(6), "the budget is stated even before the register has said it");
+        assert_eq!(filled["feedback"], json!([]));
     }
 
     #[test]
-    fn a_register_that_marks_nearly_everything_high_is_told_to_re_rank() {
+    fn the_director_is_told_what_was_not_applied_as_it_wrote_it() {
         let temp = TempDir::new().unwrap();
         let paths = paths_for(temp.path());
         let path = state_root(&paths).join("c-research-clues.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let clue = |id: &str, status: &str, importance: &str| json!({"clue_id": id, "status": status, "importance": importance});
-        // 9 of 10 live clues are high; the retired high one does not count as live.
-        let mut clues: Vec<Value> = (0..9).map(|n| clue(&format!("h{n}"), "open", "high")).collect();
-        clues.push(clue("m", "in_use", "medium"));
-        clues.push(clue("r", "retired", "high"));
-        write_json(&path, &json!({"clues": clues, "director_view": []})).unwrap();
+        write_json(&path, &json!({
+            "clues": [clue("a", "open", "high"), clue("b", "in_use", "high"), clue("c", "retired", "high")],
+            "director_view": [],
+            "max_high_live": 6,
+            "feedback": [
+                {"kind": "refused", "clue_id": "x", "lane_id": "followup-lab-director-9", "text": "Clue x could not be made high: 6 live clues already are (a; b). Update one of those to medium or low first."},
+                {"kind": "demoted", "clue_id": "y", "lane_id": "harness", "text": "Clue y was set to medium: at most 6 live clues can be high."}
+            ]
+        })).unwrap();
         let payload = research_clues_payload(&paths, "c");
-        assert_eq!(payload["clues_live"], json!(10));
-        assert_eq!(payload["clues_live_high"], json!(9));
-        let note = payload["importance_note"].as_str().expect("a note");
-        assert!(note.contains("9 of your 10 live clues"), "{note}");
-        assert!(note.contains("importance"), "{note}");
-
-        // Seven in ten is not over the line; fewer than eight live clues is too few to say.
-        let mut mixed: Vec<Value> = (0..7).map(|n| clue(&format!("h{n}"), "open", "high")).collect();
-        mixed.extend((0..3).map(|n| clue(&format!("m{n}"), "open", "medium")));
-        write_json(&path, &json!({"clues": mixed, "director_view": []})).unwrap();
-        assert!(research_clues_payload(&paths, "c")["importance_note"].is_null());
-        let few: Vec<Value> = (0..5).map(|n| clue(&format!("h{n}"), "open", "high")).collect();
-        write_json(&path, &json!({"clues": few, "director_view": []})).unwrap();
-        assert!(research_clues_payload(&paths, "c")["importance_note"].is_null());
+        assert_eq!(payload["clues_live"], json!(2));
+        assert_eq!(payload["clues_live_high"], json!(2), "a retired clue holds no slot");
+        assert_eq!(payload["feedback"].as_array().unwrap().len(), 2);
+        assert!(payload["feedback"][0]["text"].as_str().unwrap().contains("could not be made high"));
+        assert!(payload["how_to_use"].as_str().unwrap().contains("high_cap"));
     }
 
     #[test]

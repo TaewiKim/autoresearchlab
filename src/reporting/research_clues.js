@@ -32,6 +32,11 @@ const MAX_TEXT_CHARS = 400;
 const MAX_REFS = 6;
 const MAX_HISTORY = 12;
 const DIRECTOR_VIEW_LIMIT = 30;
+// Live clues that may be `high` at once. The owner's rule (2026-10-29): left to
+// itself the director marked 30 of 32 clues high, and asked to re-rank it did
+// not, so `high` is a budget, not a label.
+const MAX_HIGH_LIVE = 6;
+const FEEDBACK_KEPT = 12;
 
 function cluesPath(root, cycleId) {
   return path.join(root, "state", `${cycleId}-research-clues.json`);
@@ -79,11 +84,47 @@ function note(clue, by, at, change) {
   clue.last_updated_at = at;
 }
 
+function isLive(clue) {
+  return clue.status === "open" || clue.status === "in_use";
+}
+
+function liveHigh(register) {
+  return register.clues.filter((clue) => isLive(clue) && clue.importance === "high");
+}
+
+function holders(register) {
+  return liveHigh(register).map((clue) => `${clue.clue_id} (${clip(clue.statement, 70)})`).join("; ");
+}
+
+function clean(value) {
+  return String(value ?? "").trim();
+}
+
+// Keep the live `high` clues within the budget. The ones to keep are those in
+// use, then the most recently touched; the rest become `medium`, with the reason
+// in their history and in what the director is told. Not a judgement about the
+// science: a rule the owner set, applied the same way every time.
+function enforceHighBudget(register, at, feedback) {
+  let demoted = 0;
+  while (liveHigh(register).length > MAX_HIGH_LIVE) {
+    const victim = liveHigh(register).sort((a, b) =>
+      (a.status === "in_use") - (b.status === "in_use")
+      || Date.parse(a.last_updated_at || 0) - Date.parse(b.last_updated_at || 0))[0];
+    victim.importance = "medium";
+    note(victim, "harness", at, `importance high -> medium: more than ${MAX_HIGH_LIVE} live clues were high; the ones in use and the most recently touched kept it`);
+    feedback.push({ kind: "demoted", clue_id: victim.clue_id, text: `Clue ${victim.clue_id} was set to medium: at most ${MAX_HIGH_LIVE} live clues can be high. To make it high again, update another from high to medium or low first.` });
+    demoted += 1;
+  }
+  return demoted;
+}
+
 // One director's operations on the register. Returns what it did and what it
 // refused (and why), so a malformed entry is visible, never silently lost.
-function applyOperations(register, operations, by, at) {
+// `feedback` collects what the director is told about it on its next lane.
+function applyOperations(register, operations, by, at, feedback = []) {
   const done = [];
   const refused = [];
+  const deferred = [];
   for (const raw of Array.isArray(operations) ? operations : []) {
     const op = String(raw?.op || "").trim().toLowerCase();
     if (op === "add") {
@@ -97,7 +138,7 @@ function applyOperations(register, operations, by, at) {
         refused.push({ op, why: `kind must be one of ${KINDS.join(", ")}`, statement: statement.slice(0, 60) });
         continue;
       }
-      const importance = IMPORTANCE.includes(raw.importance) ? raw.importance : "medium";
+      let importance = IMPORTANCE.includes(raw.importance) ? raw.importance : "medium";
       const id = clueId(statement);
       const existing = register.clues.find((clue) => clue.clue_id === id);
       if (existing) {
@@ -108,6 +149,10 @@ function applyOperations(register, operations, by, at) {
         note(existing, by, at, reopened ? "recorded again; reopened" : "recorded again");
         done.push({ op, clue_id: id, merged: true });
         continue;
+      }
+      if (importance === "high" && liveHigh(register).length >= MAX_HIGH_LIVE) {
+        importance = "medium";
+        feedback.push({ kind: "capped", clue_id: id, text: `Clue ${id} was recorded as medium: ${MAX_HIGH_LIVE} live clues are already high (${holders(register)}). To make it high, update one of those to medium or low first.` });
       }
       register.clues.push({
         clue_id: id,
@@ -148,13 +193,22 @@ function applyOperations(register, operations, by, at) {
         continue;
       }
       const changes = [];
+      let queued = false;
       if (status && status !== clue.status) { clue.status = status; changes.push(`status ${status}`); }
-      if (importance && importance !== clue.importance) { clue.importance = importance; changes.push(`importance ${importance}`); }
+      if (importance === "high" && clue.importance !== "high" && isLive(clue)) {
+        // A lane may free a slot and fill it in the same breath: decide after the rest.
+        deferred.push({ clue, text });
+        queued = true;
+      } else if (importance && importance !== clue.importance) {
+        clue.importance = importance;
+        changes.push(`importance ${importance}`);
+      }
       if (raw.evidence_refs) {
         clue.evidence_refs = [...new Set([...(clue.evidence_refs || []), ...refsOf(raw.evidence_refs)])].slice(0, MAX_REFS * 3);
         changes.push("evidence added");
       }
       if (text) changes.push(text);
+      if (queued && !changes.length) continue; // the promotion is decided with the rest, below
       if (!changes.length) {
         refused.push({ op, why: "nothing to change", clue_id: id });
         continue;
@@ -164,6 +218,22 @@ function applyOperations(register, operations, by, at) {
     } else {
       refused.push({ op: op || "(missing)", why: "op must be add or update" });
     }
+  }
+  for (const item of deferred) {
+    const { clue } = item;
+    if (!isLive(clue) || clue.importance === "high") continue;
+    if (liveHigh(register).length >= MAX_HIGH_LIVE) {
+      refused.push({ op: "update", why: `${MAX_HIGH_LIVE} live clues are already high`, clue_id: clue.clue_id });
+      feedback.push({ kind: "refused", clue_id: clue.clue_id, text: `Clue ${clue.clue_id} could not be made high: ${MAX_HIGH_LIVE} live clues already are (${holders(register)}). Update one of those to medium or low first.` });
+      continue;
+    }
+    clue.importance = "high";
+    note(clue, by, at, ["importance high", clean(item.text)].filter(Boolean).join("; "));
+    done.push({ op: "update", clue_id: clue.clue_id });
+  }
+  for (const entry of refused) {
+    if (entry.clue_id && feedback.some((item) => item.clue_id === entry.clue_id && item.kind === "refused")) continue;
+    feedback.push({ kind: "refused", clue_id: entry.clue_id || null, text: `Your ${entry.op} ${entry.clue_id ? `of ${entry.clue_id} ` : ""}was not applied: ${entry.why}.` });
   }
   return { done, refused };
 }
@@ -205,7 +275,7 @@ function applyDirectorClueUpdates({ root, cycleId, now = new Date() }) {
   try {
     entries = fs.readdirSync(lanesDir).filter((name) => name.includes("lab-director"));
   } catch {
-    return { applied: [], refused: [], changed: false };
+    entries = []; // no lanes yet; the register may still be over its budget
   }
   const register = readRegister(root, cycleId);
   const pending = [];
@@ -226,27 +296,36 @@ function applyDirectorClueUpdates({ root, cycleId, now = new Date() }) {
     }
     pending.push({ laneId, mtimeMs: stat.mtimeMs, operations });
   }
-  if (!pending.length) {
-    if (!register.updated_at && !register.clues.length) return { applied: [], refused: [], changed: false };
-    return { applied: [], refused: [], changed: false, register };
-  }
   pending.sort((a, b) => a.mtimeMs - b.mtimeMs);
   const applied = [];
   const refused = [];
+  const told = [];
   for (const item of pending) {
     const at = new Date(item.mtimeMs).toISOString();
-    const result = applyOperations(register, item.operations, item.laneId, at);
+    const feedback = [];
+    const result = applyOperations(register, item.operations, item.laneId, at, feedback);
     applied.push(...result.done.map((entry) => ({ ...entry, lane_id: item.laneId })));
     refused.push(...result.refused.map((entry) => ({ ...entry, lane_id: item.laneId })));
+    told.push(...feedback.map((entry) => ({ ...entry, lane_id: item.laneId, at })));
     register.applied_lanes[item.laneId] = item.mtimeMs;
+  }
+  // The budget holds whatever the lanes did, and for a register that predates it.
+  const budgetFeedback = [];
+  const demoted = enforceHighBudget(register, new Date(now).toISOString(), budgetFeedback);
+  told.push(...budgetFeedback.map((entry) => ({ ...entry, lane_id: "harness", at: new Date(now).toISOString() })));
+  if (!pending.length && !demoted) {
+    if (!register.updated_at && !register.clues.length) return { applied: [], refused: [], changed: false };
+    return { applied: [], refused: [], changed: false, register };
   }
   register.updated_at = new Date(now).toISOString();
   register.director_view = directorView(register);
   register.refused_recent = refused.slice(-10);
+  register.feedback = [...(register.feedback || []), ...told].slice(-FEEDBACK_KEPT);
+  register.max_high_live = MAX_HIGH_LIVE;
   try {
     writeRegister(root, cycleId, register);
   } catch { /* observing must never stop a cycle */ }
-  return { applied, refused, changed: applied.length > 0, register };
+  return { applied, refused, changed: applied.length > 0 || demoted > 0, register };
 }
 
 function summarize(register) {
@@ -289,6 +368,8 @@ module.exports = {
   clueId,
   cluesPath,
   directorView,
+  enforceHighBudget,
+  MAX_HIGH_LIVE,
   readRegister,
   renderClues,
   summarize,
