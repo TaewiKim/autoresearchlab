@@ -1223,14 +1223,32 @@ fn research_clues_payload(paths: &AppPaths, cycle_id: &str) -> Value {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let live = clues
+    let live_clues: Vec<&Value> = clues
         .iter()
         .filter(|clue| matches!(clue.get("status").and_then(Value::as_str), Some("open") | Some("in_use")))
+        .collect();
+    let live = live_clues.len();
+    let high = live_clues
+        .iter()
+        .filter(|clue| clue.get("importance").and_then(Value::as_str) == Some("high"))
         .count();
+    // MEASURED ON cycle-a-20260919, 2026-10-29: 30 of the 32 clues the
+    // director had recorded were marked high, so the register could not say which
+    // mattered. The importance is the director's to give; when it has stopped
+    // telling clues apart the director is told so, with the counts, and re-ranks.
+    let importance_note = if live >= 8 && high * 10 > live * 7 {
+        json!(format!(
+            "{high} of your {live} live clues are marked `high`, so `high` no longer tells them apart. `high` is for a clue that would change which lead you choose or how you refine it; re-rank: update the ones that no longer would to `medium` or `low` (an `update` with the clue_id and the new `importance`), and keep `high` for the few that still do."
+        ))
+    } else {
+        Value::Null
+    };
     json!({
         "register": view,
         "clues_total": clues.len(),
         "clues_live": live,
+        "clues_live_high": high,
+        "importance_note": importance_note,
         "recorded_in": format!(".research-lab/state/{cycle_id}-research-clues.json"),
         "how_to_use": "Your clue register, kept whatever happens to the lead. Read it before you choose, refine, replace or conclude. Record what this round taught that the next lead should not have to find out again in `research_clue_updates` (add a clue, or update one by `clue_id`); resolving or retiring a clue needs a note saying why. See research_clues_duty.",
     })
@@ -1445,6 +1463,37 @@ mod rebuttal_and_alternate_pilot_tests {
         assert_eq!(filled["clues_live"], json!(2), "retired clues are not live");
         assert_eq!(filled["register"].as_array().unwrap().len(), 2);
         assert_eq!(filled["recorded_in"], json!(".research-lab/state/c-research-clues.json"));
+        assert_eq!(filled["clues_live_high"], json!(1));
+        assert!(filled["importance_note"].is_null(), "two live clues need no re-ranking");
+    }
+
+    #[test]
+    fn a_register_that_marks_nearly_everything_high_is_told_to_re_rank() {
+        let temp = TempDir::new().unwrap();
+        let paths = paths_for(temp.path());
+        let path = state_root(&paths).join("c-research-clues.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let clue = |id: &str, status: &str, importance: &str| json!({"clue_id": id, "status": status, "importance": importance});
+        // 9 of 10 live clues are high; the retired high one does not count as live.
+        let mut clues: Vec<Value> = (0..9).map(|n| clue(&format!("h{n}"), "open", "high")).collect();
+        clues.push(clue("m", "in_use", "medium"));
+        clues.push(clue("r", "retired", "high"));
+        write_json(&path, &json!({"clues": clues, "director_view": []})).unwrap();
+        let payload = research_clues_payload(&paths, "c");
+        assert_eq!(payload["clues_live"], json!(10));
+        assert_eq!(payload["clues_live_high"], json!(9));
+        let note = payload["importance_note"].as_str().expect("a note");
+        assert!(note.contains("9 of your 10 live clues"), "{note}");
+        assert!(note.contains("importance"), "{note}");
+
+        // Seven in ten is not over the line; fewer than eight live clues is too few to say.
+        let mut mixed: Vec<Value> = (0..7).map(|n| clue(&format!("h{n}"), "open", "high")).collect();
+        mixed.extend((0..3).map(|n| clue(&format!("m{n}"), "open", "medium")));
+        write_json(&path, &json!({"clues": mixed, "director_view": []})).unwrap();
+        assert!(research_clues_payload(&paths, "c")["importance_note"].is_null());
+        let few: Vec<Value> = (0..5).map(|n| clue(&format!("h{n}"), "open", "high")).collect();
+        write_json(&path, &json!({"clues": few, "director_view": []})).unwrap();
+        assert!(research_clues_payload(&paths, "c")["importance_note"].is_null());
     }
 
     #[test]
