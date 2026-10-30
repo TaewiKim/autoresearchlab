@@ -41,7 +41,7 @@ test("analysts re-check the live contract before submitting a handoff",()=>{
   // during each lane and their completed primary handoffs were discarded.
   const f=fixture(), c=currentAnalysisContract(f.root,"c"), p={planner_metadata:{}};
   assert.equal(bindAnalystPlan(p,c),true);
-  assert.equal(p.planner_metadata.analysis_contract_binding_version,6);
+  assert.equal(p.planner_metadata.analysis_contract_binding_version,7);
   assert.match(p.followup_description,/Immediately before writing the final handoff/);
   assert.match(p.followup_description,/--current/);
   assert.match(p.followup_description,/revise the handoff and frozen blueprint to match it before completing/);
@@ -71,7 +71,7 @@ test("pending analysts are rebound to regenerate incomplete primary contrast row
   assert.deepEqual(found.map(x=>x.lane_ids),[["followup-runner-347"]]);
   assert.deepEqual(repairQueuedAnalystContracts({cwd:f.cwd,cycleId:"c"}),["followup-analyst-866"]);
   const rebound=JSON.parse(fs.readFileSync(path.join(analyst,"role-plan.json")));
-  assert.equal(rebound.planner_metadata.analysis_contract_binding_version,6);
+  assert.equal(rebound.planner_metadata.analysis_contract_binding_version,7);
   assert.match(rebound.followup_description,/finite estimate, simultaneous_lower, and simultaneous_upper/);
   assert.match(rebound.followup_description,/never mix descriptive estimates with missing bounds/);
   assert.match(rebound.followup_description,/exactly one new immutable validation run/);
@@ -97,7 +97,7 @@ test("mixed comparators encoded by registered contrast IDs become canonical befo
   });
   const plan={planner_metadata:{}};
   assert.equal(bindAnalystPlan(plan,contract),true);
-  assert.equal(plan.planner_metadata.analysis_contract_binding_version,6);
+  assert.equal(plan.planner_metadata.analysis_contract_binding_version,7);
   assert.match(plan.followup_description,/contrast_comparators\[contrast_id\]/);
 });
 test("only verified outputs with the current contract bind, even under a family alias",()=>{
@@ -138,7 +138,7 @@ test("one pending analyst receives the measured current-contract execution failu
     const dir=path.join(f.root,"lanes","c",`followup-analyst-${id}`);
     f.write(path.join(dir,"lane-contract.json"),{role:"analyst"});
     f.write(path.join(dir,"role-plan.json"),{role:"analyst",action_type:action,assigned_hypotheses:[c.statement],
-      followup_description:"already current",planner_metadata:{analysis_contract:c,analysis_contract_binding_version:6,
+      followup_description:"already current",planner_metadata:{analysis_contract:c,analysis_contract_binding_version:7,
         ...(id==="939"?{review_action:{analysis_request:{analyst_handoff:{analysis_contract:{contract_id:"analysis:retired"}}}},
           failed_runner_context:{analysis_contract_validation:{contract_id:"analysis:retired",status:"verified"}}}:{})}});
   }
@@ -229,9 +229,28 @@ test("an analyst bound to one measured contract is told its numbers and not aske
   assert.equal(bindAnalystPlan(p,c,null,once),true);
   assert.match(p.followup_description,/already available: verified execution followup-runner-458 \(p1=0\.8992 \[0\.1585, 1\.64\]/);
   assert.doesNotMatch(p.followup_description,/exactly one new immutable validation run/);
+  assert.doesNotMatch(p.followup_description,/Prepare the executable validation/);
   assert.match(p.followup_description,/runs no further primary execution of this measurement specification/);
+  assert.match(p.followup_description,/Do not author or emit another primary handoff/);
+  assert.equal(p.action_type,"runner_result_interpretation_followup");
+  assert.equal(p.source_brief_id,"followup-runner-458");
+  assert.equal(p.planner_metadata.validation_results.result_path,
+    path.join(f.root,"lanes","c","followup-runner-458","result.json"));
+  assert.equal(p.planner_metadata.validation_results.analysis_contract_validation.status,"verified");
   assert.doesNotMatch(p.followup_description,/One independent reproduction/);
   assert.equal(bindAnalystPlan(p,c,null,once),false);
+  const queuedUnderOldRule={
+    assigned_hypotheses:[c.statement],
+    followup_description:"Prepare the executable validation even though it is measured.",
+    planner_metadata:{
+      analysis_contract:c,
+      analysis_contract_binding_version:6,
+      analysis_contract_measurements:once,
+    },
+  };
+  assert.equal(bindAnalystPlan(queuedUnderOldRule,c,null,once),true);
+  assert.equal(queuedUnderOldRule.action_type,"runner_result_interpretation_followup");
+  assert.doesNotMatch(queuedUnderOldRule.followup_description,/Prepare the executable validation/);
 
   runner("followup-runner-459","verified");
   lanes(["followup-runner-446","followup-runner-458","followup-runner-459"]);
@@ -241,6 +260,25 @@ test("an analyst bound to one measured contract is told its numbers and not aske
   assert.match(p.followup_description,/runs no further primary execution of this measurement specification/);
   assert.match(p.followup_description,/analysis_evidence_role=supporting/);
   assert.deepEqual(p.planner_metadata.analysis_contract_measurements.map(x=>x.lane_id),["followup-runner-458","followup-runner-459"]);
+});
+
+test("a measured contract routes the analyst to interpretation instead of another handoff",()=>{
+  // MEASURED ON cycle-a-20260919, 2026-10-29: analyst 1335 was
+  // given runner 796's verified primary contrasts but was still required to
+  // emit a primary handoff, which the harness discarded as already measured.
+  const f=fixture(), contract=currentAnalysisContract(f.root,"c"), plan={planner_metadata:{}};
+  const resultPath=path.join(f.root,"lanes","c","followup-runner-796","result.json");
+  const measurements=[{lane_id:"followup-runner-796",result_path:resultPath,primary_contrasts:[{
+    contrast_id:"dp_r030_targeted_minus_random_net_success_discordance",
+    estimate:"0.412109375",simultaneous_lower:"0.062109375",simultaneous_upper:"0.762109375",status:"estimable",
+  }]}];
+
+  assert.equal(bindAnalystPlan(plan,contract,null,measurements),true);
+  assert.equal(plan.action_type,"runner_result_interpretation_followup");
+  assert.equal(plan.source_brief_id,"followup-runner-796");
+  assert.equal(plan.planner_metadata.validation_results.result_path,resultPath);
+  assert.match(plan.followup_description,/emit a lab_director_validation_report/);
+  assert.doesNotMatch(plan.followup_description,/Prepare the executable validation|writing the final handoff/);
 });
 
 test("a result-informed lead rewrite retains measurements of the same registered specification",()=>{

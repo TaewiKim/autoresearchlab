@@ -55,6 +55,7 @@ const ANALYST_CONTRACT_INSTRUCTION = "Prepare the executable validation for plan
 
 const NEW_RUN_SENTENCE = " Do not reuse or relabel previously executed code: author a revised frozen blueprint for exactly one new immutable validation run.";
 if (!ANALYST_CONTRACT_INSTRUCTION.includes(NEW_RUN_SENTENCE)) throw new Error("analysis_contract: the new-run sentence moved");
+const MEASURED_CONTRACT_INSTRUCTION = "Interpret the completed primary measurement in planner_metadata.analysis_contract_measurements for LabDirector. Read the named runner result and artifacts, assess the registered falsifiers, controls, protocol deviations, and remaining confounders, and emit a lab_director_validation_report. Do not author or emit another primary handoff or validation blueprint for this measured contract. If the measurement is wrong, identify the exact defect in the report so LabDirector can change the lead or its specification; do not repair it by re-running the same contract.";
 
 function analysisContractIds(value, found = new Set()) {
   if (Array.isArray(value)) value.forEach((item) => analysisContractIds(item, found));
@@ -193,7 +194,7 @@ function bindAnalystPlan(plan, contract, recovery = null, measurements = []) {
   const measuredBy = measurements.map((item) => item.lane_id);
   const contractBound = previous?.contract_id === contract.contract_id
       && JSON.stringify(plan.assigned_hypotheses) === JSON.stringify([contract.statement])
-      && plan.planner_metadata.analysis_contract_binding_version === 6
+      && plan.planner_metadata.analysis_contract_binding_version === 7
       && JSON.stringify((plan.planner_metadata.analysis_contract_measurements || []).map((item) => item.lane_id)) === JSON.stringify(measuredBy)
       && (contract.operational_spec || plan.followup_description?.includes("--register-spec"));
   const recoveryBound = !recovery || (plan.planner_metadata?.analysis_contract_recovery?.lane_id === recovery.lane_id
@@ -211,17 +212,44 @@ function bindAnalystPlan(plan, contract, recovery = null, measurements = []) {
   // MEASURED ON cycle-a-20260919, 2026-10-26: plans already bound
   // after one measurement still invited a reproduction. Rebind them once so
   // the existing result replaces that stale instruction.
-  plan.planner_metadata.analysis_contract_binding_version = 6;
+  plan.planner_metadata.analysis_contract_binding_version = 7;
   plan.planner_metadata.current_lead_under_analysis = contract;
   plan.planner_metadata.candidate_hypotheses = [{ family: contract.primary_family, statement: contract.statement }];
   // Old scientific assignments must not compete with the canonical contract.
   plan.planner_metadata.blocker_reasons = [];
   plan.analysis_goals = contract.estimands;
-  plan.followup_description = measurements.length >= CONTRACT_MEASUREMENTS_BEFORE_HOLD
-    ? ANALYST_CONTRACT_INSTRUCTION.replace(NEW_RUN_SENTENCE, "")
+  const contractMeasured = measurements.length >= CONTRACT_MEASUREMENTS_BEFORE_HOLD;
+  plan.followup_description = contractMeasured
+    ? MEASURED_CONTRACT_INSTRUCTION
     : ANALYST_CONTRACT_INSTRUCTION;
   if (measurements.length) plan.planner_metadata.analysis_contract_measurements = measurements;
   else delete plan.planner_metadata.analysis_contract_measurements;
+  if (contractMeasured) {
+    // MEASURED ON cycle-a-20260919, 2026-10-29: analyst 1335 was
+    // told the contract was already measured, but its assignment still began
+    // "Prepare the executable validation" and its schema required a handoff,
+    // so its correction of runner 796 was set aside as another primary run.
+    // Make the existing measurement an interpretation input, whose schema can
+    // carry either acceptance or the concrete reason it is scientifically wrong.
+    const measurement = measurements[0];
+    plan.action_type = "runner_result_interpretation_followup";
+    plan.source_brief_id = measurement.lane_id;
+    plan.planner_metadata.validation_results = {
+      lane_id: measurement.lane_id,
+      result_path: measurement.result_path,
+      primary_contrasts: measurement.primary_contrasts,
+      analysis_contract_validation: {
+        contract_id: contract.contract_id,
+        status: "verified",
+        evidence_role: "primary",
+      },
+    };
+    plan.planner_metadata.analysis_request = {
+      source: "measured-contract-interpretation",
+      runner_lane_id: measurement.lane_id,
+      result_path: measurement.result_path,
+    };
+  }
   plan.followup_description += measurementInstruction(measurements);
   if (!contract.operational_spec) plan.followup_description += " Before authoring the blueprint, preregister a machine-readable spec under this lane: comparator, required_contrast_ids, dataset_sha256, canonical_statement, canonical_estimands, and base_contract_id. Register it with node src/policy/analysis_contract.js <cwd> <cycleId> <laneId> --register-spec <spec-file>. Use the returned updated contract_id. Registration cannot overwrite an existing registered specification or change the canonical hypothesis.";
   if (recovery) {

@@ -609,6 +609,73 @@ mod current_lead_completed_gate_tests {
         .unwrap()
     }
 
+    fn analyst_contract(root: &Path, cycle_id: &str) -> LaneContract {
+        serde_json::from_value(json!({
+            "cycle_id": cycle_id,
+            "lane_id": "followup-analyst-1357",
+            "role": "analyst",
+            "runtime_class": "codex-agent",
+            "mode": "read-write-scoped",
+            "cwd": root,
+            "task_file": root.join("task.md"),
+            "output_artifact": root.join("result.json"),
+            "fallback_strategy": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn queued_analyst_waits_for_the_latest_handoff_runner_measurement() {
+        // MEASURED ON cycle-a-20260919, 2026-10-29: analysts 1337
+        // and 1357 launched before runners 803/819 for the immediately prior
+        // handoff, then produced primary handoffs the completed runner made
+        // contract_already_measured. Reproduce the same dependency record.
+        let temp = TempDir::new().unwrap();
+        let paths = paths_for(temp.path());
+        let cycle_id = "cycle-a-20260919";
+        let lane_dir = lane_root(&paths, cycle_id, "followup-analyst-1357");
+        fs::create_dir_all(&lane_dir).unwrap();
+        write_json(
+            &lane_dir.join("role-plan.json"),
+            &json!({"role": "analyst", "action_type": "novelty_followup"}),
+        )
+        .unwrap();
+        write_json(
+            &state_root(&paths).join(format!("{cycle_id}-lab-director-hypothesis.json")),
+            &json!({
+                "status": "selected",
+                "statement": "loss-family refinement interaction",
+                "primary_family": "loss_family_refinement_support_interaction",
+                "validation_data_status": "materialized"
+            }),
+        )
+        .unwrap();
+        let snapshot = DependencySnapshot {
+            counts: HashMap::from([
+                ("analyst".to_string(), 1),
+                ("lab-runner".to_string(), 1),
+            ]),
+            completed_scouts: 1,
+            completed_data_scouts: 1,
+            has_lab_director_hypothesis: true,
+            conclusion_needs_hypothesis_strategy: false,
+            hypothesis_gate_passed: false,
+            latest_analyst_handoff_signal: None,
+            pending_runner_post_run_review: Some(
+                "waiting-for-latest-analyst-handoff-runner analyst_handoff_path=/lanes/followup-analyst-1356/handoff-validation-plan.json".to_string(),
+            ),
+        };
+
+        let blocker = raw_dependency_blocker_for_lane_with_snapshot(
+            &paths,
+            cycle_id,
+            &analyst_contract(temp.path(), cycle_id),
+            &snapshot,
+        )
+        .unwrap();
+        assert_eq!(blocker, snapshot.pending_runner_post_run_review);
+    }
+
     #[test]
     fn parsed_retired_reviews_do_not_block_the_queued_current_lead_review() {
         // MEASURED ON cycle-a-20260919, 2026-10-08: conclusion
@@ -1379,11 +1446,22 @@ fn raw_dependency_blocker_for_lane_with_snapshot(
                 action_type,
                 "gate_restart_followup" | "analyst_handoff_review_followup"
             );
+        // MEASURED ON cycle-a-20260919, 2026-10-29: queued analysts
+        // 1337 and 1357 started while the preceding analysts' executable
+        // handoffs were waiting for runners 803 and 819. Both rebuilt the same
+        // primary contract without the result that completed seconds later,
+        // and both handoffs were consequently discarded as already measured.
+        // Let the runner finish first; launch-time context refresh can then turn
+        // the queued analyst into an interpretation of that measurement.
+        let analyst_would_rebuild_pending_handoff = contract.role == "analyst"
+            && action_type != "runner_result_interpretation_followup"
+            && post_run_blocker.starts_with("waiting-for-latest-analyst-handoff-runner");
         if !labdirector_is_runner_recovery
             && (matches!(
                 contract.role.as_str(),
                 "gatekeeper" | "illustrator" | "author"
-            ) || labdirector_is_gate_consumer)
+            ) || labdirector_is_gate_consumer
+                || analyst_would_rebuild_pending_handoff)
         {
             return Ok(Some(post_run_blocker.clone()));
         }
