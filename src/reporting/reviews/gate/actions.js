@@ -651,7 +651,7 @@ function authoritativeGateFollowupActions({
   const actions = buildGateFollowupActions(
     summary,
     challengeQuestions,
-    aggregateReview?.pendingRubrics || [],
+    uniqueStrings([...(aggregateReview?.pendingRubrics || []), ...(aggregateReview?.confirmationRubrics || [])]),
     { previousReviewContext, chronicleResearchContext },
   );
 

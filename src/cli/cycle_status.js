@@ -50,8 +50,9 @@ const HEADLINE = {
   gate: (d) => {
     const parts = d.rounds_whole != null ? ` (${d.rounds_whole} whole, ${d.rounds_partial} partial, ${d.rounds_unrecorded} unrecorded)` : "";
     const partial = Array.isArray(d.latest_unreviewed) && d.latest_unreviewed.length ? ` PARTIAL: ${d.latest_unreviewed.length} rubric(s) not yet reviewed` : "";
+    const awaiting = Array.isArray(d.latest_unconfirmed) && d.latest_unconfirmed.length ? ` AWAITING CONFIRMATION: ${d.latest_unconfirmed.join(", ")}` : "";
     const mode = d.latest_mode ? ` ${d.latest_mode}` : "";
-    return `round ${d.gate_rounds ?? "?"}${parts}${d.latest_score != null ? `, latest ${d.latest_score}${mode}${partial}` : ""}${d.gate_passed ? ", PASSED" : ""}, best ${JSON.stringify(d.best_by_rubric || {})}${d.rounds_whole ? " over whole rounds" : ""}`;
+    return `round ${d.gate_rounds ?? "?"}${parts}${d.latest_score != null ? `, latest ${d.latest_score}${mode}${partial}${awaiting}` : ""}${d.gate_passed ? ", PASSED" : ""}, best ${JSON.stringify(d.best_by_rubric || {})}${d.rounds_whole ? " over whole rounds" : ""}`;
   },
   capability: (d) => `${d.verified ?? 0} verified, ${d.unavailable ?? 0} measured absent${d.implemented_but_not_probed?.length ? `, UNPROBED: ${d.implemented_but_not_probed.join(", ")}` : ""}`,
   clues: (d) => {

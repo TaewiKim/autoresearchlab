@@ -172,13 +172,91 @@ function collectParsedGatekeeperReviews(candidates) {
   };
 }
 
+// One focused review is one sample of a noisy judge. MEASURED ON
+// cycle-a-20260919, 2026-10-30: the same lead on the same analysis
+// contract was scored technical_quality 58, 46 and 34 by three reviewers in 25
+// minutes with no new evidence, and a round that passed at 81 was a reject at
+// 77 seven minutes later because clarity was re-sampled 76 -> 58. Taking the
+// newest review per rubric turned that spread (sd 8-19 points per rubric) into
+// the composite. Owner decision 2026-10-30:
+//   A. a rubric's score is the median of the newest SMOOTHING_WINDOW reviews of
+//      the same lead on the same analysis contract (the lower of two), so one
+//      outlier cannot decide it. New evidence changes the contract id and starts
+//      the count over.
+//   B. a pass is confirmed only when every rubric rests on at least
+//      MIN_CONFIRMING_REVIEWS such reviews; see `unconfirmedRubrics`.
+const SMOOTHING_WINDOW = 3;
+const MIN_CONFIRMING_REVIEWS = 2;
+
+function evidenceKey(review) {
+  const lead = String(review?.briefed_lead_key || "").trim();
+  const contract = String(review?.briefed_analysis_contract_id || "").trim();
+  return lead || contract ? `${lead}|${contract}` : null;
+}
+
+function focusedScoreOf(review) {
+  const item = (review.rubric || []).find((entry) => entry.name === review.focus_rubric);
+  if (item && Number.isFinite(Number(item.score))) {
+    return review.partial_current_hypothesis_credit === true
+      ? Math.min(Number(item.score), 90)
+      : Number(item.score);
+  }
+  return review.verdict === "approve" ? 95 : review.verdict === "challenge" ? 75 : 45;
+}
+
+// `reviews` are one rubric's focused reviews, newest first. Returns the review
+// that stands for the rubric and the samples behind it. Reviews with no lead
+// or contract stamp cannot be matched to one another and are never smoothed.
+function representativeReview(reviews) {
+  const newest = reviews[0];
+  const key = evidenceKey(newest);
+  if (key === null) return { review: newest, samples: [newest] };
+  const same = reviews.filter((review) => evidenceKey(review) === key);
+  // A 0 on an applicable rubric is not an observation (see the loop below).
+  const measured = same.filter((review) => focusedScoreOf(review) > 0);
+  const window = (measured.length > 0 ? measured : same).slice(0, SMOOTHING_WINDOW);
+  if (window.length < 2) return { review: window[0], samples: window };
+  const ranked = window
+    .map((review, index) => ({ review, index, score: focusedScoreOf(review) }))
+    .sort((a, b) => a.score - b.score || a.index - b.index);
+  // The middle of three, the lower of two: fail-closed when it cannot be exact.
+  const chosen = ranked[Math.floor((ranked.length - 1) / 2)].review;
+  const newestOfWindow = window[0];
+  return {
+    review: {
+      ...chosen,
+      // The lane that spoke last still owns the bookkeeping that is not a score.
+      lane_id: newestOfWindow.lane_id,
+      blocker_adjudications: newestOfWindow.blocker_adjudications,
+      required_response_from_lab_director: newestOfWindow.required_response_from_lab_director,
+      recommended_actions: newestOfWindow.recommended_actions,
+      smoothed_from: window.map((review) => ({ lane_id: review.lane_id || null, score: focusedScoreOf(review) })),
+    },
+    samples: window,
+  };
+}
+
 function aggregateGatekeeperReviews({ parsedReviews, expectedRubrics }) {
   const reviewsByRubric = new Map();
+  const reviewsByFocus = new Map();
   const rubricEvidenceByName = new Map();
+  const orderedReviews = (parsedReviews || [])
+    .map((review, index) => ({ review, index }))
+    .sort((a, b) => Number(b.review.source_mtime || 0) - Number(a.review.source_mtime || 0) || a.index - b.index)
+    .map((entry) => entry.review);
+  for (const review of orderedReviews) {
+    if (!reviewsByFocus.has(review.focus_rubric)) reviewsByFocus.set(review.focus_rubric, []);
+    reviewsByFocus.get(review.focus_rubric).push(review);
+  }
+  const unconfirmedRubrics = [];
+  for (const [focus, reviews] of reviewsByFocus) {
+    const { review, samples } = representativeReview(reviews);
+    reviewsByRubric.set(focus, review);
+    // Reviews that carry no lead or contract stamp cannot be matched to one
+    // another, so there is nothing to confirm them against.
+    if (evidenceKey(reviews[0]) !== null && samples.length < MIN_CONFIRMING_REVIEWS) unconfirmedRubrics.push(focus);
+  }
   for (const review of parsedReviews || []) {
-    if (!reviewsByRubric.has(review.focus_rubric)) {
-      reviewsByRubric.set(review.focus_rubric, review);
-    }
     for (const item of Array.isArray(review.rubric) ? review.rubric : []) {
       const name = String(item?.name || "").trim();
       if (!name || item?.applicable === false || !Number.isFinite(Number(item?.score))) continue;
@@ -307,6 +385,9 @@ function aggregateGatekeeperReviews({ parsedReviews, expectedRubrics }) {
   return {
     verdict,
     pendingRubrics,
+    // Rubrics whose score rests on fewer than MIN_CONFIRMING_REVIEWS reviews of
+    // this lead on this contract. Only the expected ones, in rubric order.
+    unconfirmedRubrics: expectedRubrics.filter((rubric) => unconfirmedRubrics.includes(rubric)),
     partial_current_hypothesis_credit: hasPartialCurrentHypothesisCredit,
     reviews: reviewList,
     rubric: expectedRubrics.map((name) =>
@@ -418,6 +499,10 @@ function parseGatekeeperLaneOutput(candidate) {
 module.exports = {
 
   aggregateGatekeeperReviews,
+
+  MIN_CONFIRMING_REVIEWS,
+
+  SMOOTHING_WINDOW,
 
   collectParsedGatekeeperReviews,
 

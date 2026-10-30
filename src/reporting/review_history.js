@@ -84,7 +84,11 @@ const RUBRIC_FIELDS = [
 // carried the 85 and nothing saying it was a quarter of a review, and it read
 // as a gate that should have passed.
 function unreviewedRubrics(review) {
-  const names = new Set(asArray(review?.gatekeeper_pending_rubrics).map((name) => String(name)));
+  // A rubric held only for a confirming second review has been reviewed.
+  const unconfirmed = new Set(asArray(review?.gatekeeper_unconfirmed_rubrics).map((name) => String(name)));
+  const names = new Set(
+    asArray(review?.gatekeeper_pending_rubrics).map((name) => String(name)).filter((name) => !unconfirmed.has(name)),
+  );
   const rubric = Array.isArray(review?.rubric) ? review.rubric : [];
   for (const row of rubric) {
     if (row && typeof row === "object" && row.focused_review_missing === true && row.name) names.add(String(row.name));
@@ -190,6 +194,7 @@ function fingerprint(entry) {
     entry.evidence_revision,
     entry.rubric,
     entry.unreviewed_rubrics,
+    entry.unconfirmed_rubrics,
     entry.mode,
   ]);
 }
@@ -243,6 +248,9 @@ function recordReviewSnapshot({ root, cycleId, kind, review }) {
       // Gate rounds only: which rubrics had no reviewer of their own yet (a
       // round with any of these cannot pass), and the gate's verdict.
       unreviewed_rubrics: kind === "gate-review" ? unreviewedRubrics(review) : undefined,
+      // Rubrics whose score rests on a single review and would pass: held until
+      // a second review of the same evidence agrees.
+      unconfirmed_rubrics: kind === "gate-review" ? asArray(review?.gatekeeper_unconfirmed_rubrics).map(String).sort() : undefined,
       mode: kind === "gate-review" ? (review.mode || review.decision_mode || undefined) : undefined,
     };
     const filePath = historyPath(root, cycleId, kind);

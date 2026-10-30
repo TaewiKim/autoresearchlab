@@ -358,12 +358,24 @@ function buildGateReview({
     conclusionReadyForGate,
     scientificValueGate,
   });
+  // A pass is confirmed by a second review of the same evidence. Owner decision
+  // 2026-10-30, after a round that passed at 81 was a reject at 77 seven minutes
+  // later: only a gate that would otherwise pass asks, so the extra reviews are
+  // spent exactly where a single sample could be decisive. The rubrics asked
+  // about are held pending, which is also what releases the re-review hold on
+  // 'nothing new since the last round' (dependency_gates, gate_review_has_nothing_new).
+  const confirmationRubrics =
+    conclusionReadyForGate && aggregateReview.verdict === "approve"
+      ? uniqueStrings(aggregateReview.unconfirmedRubrics || [])
+      : [];
+  aggregateReview.confirmationRubrics = confirmationRubrics;
   // MEASURED ON cycle-a-20260919, 2026-10-04: five unstamped reviews
   // of retired leads occupied focused rubrics after a lead replacement. Once a
   // correctly bound review arrives, re-request each still-unbound rubric once.
   const gatekeeperPendingRubrics = conclusionReadyForGate
     ? uniqueStrings([
         ...(aggregateReview.pendingRubrics || []),
+        ...confirmationRubrics,
         ...unboundGatekeeperRubricsForRebind(
           filteredGatekeeperCollection.activeReviews,
           currentIdentity,
@@ -767,6 +779,8 @@ function buildGateReview({
       ? "challenge"
       : openSourceAgentReview.required_for_gate === true
       ? "challenge"
+      : confirmationRubrics.length > 0
+      ? "challenge"
       : aggregateReview.verdict
       ? aggregateReview.verdict
       : gatePassed && followupActions.length === 0
@@ -803,8 +817,10 @@ function buildGateReview({
   ]).map((text) =>
     [...challengeQuestionScope.superseded, ...blockerScope.superseded].find((item) => item.text === text),
   ).filter(Boolean);
-  const pendingRubricBlockers = gatekeeperPendingRubrics.map(
-    (item) => `pending gate rubric: ${item}`,
+  const pendingRubricBlockers = gatekeeperPendingRubrics.map((item) =>
+    confirmationRubrics.includes(item)
+      ? `gate rubric awaiting a confirming review of the same evidence: ${item}`
+      : `pending gate rubric: ${item}`,
   );
 
   const review = attachUnifiedReviewFields({
@@ -890,6 +906,7 @@ function buildGateReview({
     gatekeeper_review_source_action_match: aggregateReview.reviews.length > 0 ? aggregateReview.reviews[0].source_action_match : null,
     gatekeeper_expected_rubrics: expectedRubrics,
     gatekeeper_pending_rubrics: gatekeeperPendingRubrics,
+    gatekeeper_unconfirmed_rubrics: confirmationRubrics,
     gatekeeper_progress_signals: {
       has_lead_hypothesis: progressSignals.hasLeadHypothesis,
       has_dataset: progressSignals.hasDataset,

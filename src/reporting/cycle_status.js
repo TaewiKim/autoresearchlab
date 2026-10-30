@@ -293,6 +293,7 @@ function gateCheck(root, cycleId) {
       rounds_unrecorded: rounds.filter((entry) => !Array.isArray(entry.unreviewed_rubrics)).length,
       latest_unreviewed: Array.isArray(last.unreviewed_rubrics) ? last.unreviewed_rubrics : null,
       latest_mode: last.mode || null,
+      latest_unconfirmed: Array.isArray(last.unconfirmed_rubrics) ? last.unconfirmed_rubrics : null,
       best_basis: whole.length ? "whole rounds" : "all rounds (older rounds do not record which rubrics were reviewed)",
       best_by_rubric: best,
       distinct_leads: new Set(rounds.map((entry) => entry.subject).filter(Boolean)).size,

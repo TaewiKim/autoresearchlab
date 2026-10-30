@@ -1044,6 +1044,29 @@ mod new_lead_evidence_tests {
     }
 
     #[test]
+    fn a_rubric_held_for_a_confirming_review_is_released_without_new_evidence() {
+        // Owner decision 2026-10-30: a gate that would pass asks for a second
+        // review of the SAME evidence. The gate lists the rubric in
+        // gatekeeper_pending_rubrics (and gatekeeper_unconfirmed_rubrics); a hold
+        // for "nothing new since the last round" would defeat the confirmation.
+        let temp = tempfile::TempDir::new().unwrap();
+        let paths = cycle_paths(temp.path());
+        recorded_round(&paths, "the current lead");
+        current_lead(&paths, "the current lead");
+        finished_runner(&paths, "followup-runner-136", false);
+        write(
+            &state_root(&paths).join("cycle-test-gate-review.json"),
+            &json!({
+                "gatekeeper_pending_rubrics": ["clarity"],
+                "gatekeeper_unconfirmed_rubrics": ["clarity"]
+            })
+            .to_string(),
+        );
+        assert_eq!(gate_review_has_nothing_new(&paths, "cycle-test", Some("clarity")), None);
+        assert!(gate_review_has_nothing_new(&paths, "cycle-test", Some("impact")).is_some());
+    }
+
+    #[test]
     fn a_cycle_with_no_recorded_round_holds_nothing() {
         let temp = tempfile::TempDir::new().unwrap();
         let paths = cycle_paths(temp.path());
