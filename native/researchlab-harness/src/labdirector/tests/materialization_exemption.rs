@@ -171,3 +171,39 @@ fn a_fetchable_accession_still_holds_every_gated_role() {
         );
     }
 }
+
+#[test]
+fn a_lead_whose_data_the_harness_generated_under_simulations_is_materialized() {
+    // cycle-a-20260919, 2026-10-30: the lead's episodes.csv was on disk
+    // under datasets/<cycle>/simulations/<slug>, and the lookup only read
+    // datasets/<cycle>/<slug>. Fifty-six older override runners then made the
+    // lead "unobtainable", the artifact unusable, and every analyst wait for it.
+    let tmp = TempDir::new().unwrap();
+    let paths = build_paths(tmp.path());
+    let cycle = "cycle-simulated-lead";
+    fs::create_dir_all(state_root(&paths)).unwrap();
+    write_json(
+        &state_root(&paths).join(format!("{cycle}-lab-director-hypothesis.json")),
+        &json!({
+            "status": "selected",
+            "statement": "Removing nearest support makes chunked BC brittle.",
+            "dataset_or_accession": "state_support_randomized_intervention_v1",
+            "validation_data_status": "materialized"
+        }),
+    )
+    .unwrap();
+    assert!(!active_lead_dataset_materialized_on_disk(&paths, cycle), "nothing on disk yet");
+
+    let bundle = paths
+        .runtime_root
+        .join("datasets")
+        .join(cycle)
+        .join("simulations")
+        .join("state_support_randomized_intervention_v1");
+    fs::create_dir_all(&bundle).unwrap();
+    assert!(!active_lead_dataset_materialized_on_disk(&paths, cycle), "an empty directory is not data");
+    fs::write(bundle.join("episodes.csv"), "episode,success
+0,1
+").unwrap();
+    assert!(active_lead_dataset_materialized_on_disk(&paths, cycle));
+}

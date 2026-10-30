@@ -1453,6 +1453,19 @@ pub(crate) fn dataset_reference_materialized(
     if dataset_dir_non_empty(&datasets_root.join(&slug)) {
         return true;
     }
+    // MEASURED ON cycle-a-20260919, 2026-10-30: the harness writes the
+    // data it generates under datasets/<cycle>/simulations/<slug>, and only
+    // fetched bundles sit directly under datasets/<cycle>/. A lead whose
+    // 12 MB episodes.csv was on disk was called unobtainable, its hypothesis
+    // artifact "missing", and four analysts, two authors and an illustrator
+    // waited 70 minutes for a file that existed. One level down is looked at too.
+    if let Ok(entries) = std::fs::read_dir(datasets_root) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() && dataset_dir_non_empty(&entry.path().join(&slug)) {
+                return true;
+            }
+        }
+    }
     if let Ok(entries) = std::fs::read_dir(datasets_root) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
