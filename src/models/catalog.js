@@ -30,8 +30,8 @@ function codexCatalog() {
         token_policy: "use-at-most-two-decisive-routes-per-cycle",
       },
       {
-        id: "gpt-5.6-sol",
-        family: "gpt-5",
+        id: "gpt-6.1-sol",
+        family: "gpt-6",
         tier: "frontier",
         strengths: ["planning", "synthesis", "complex reasoning", "final review"],
         suitable_roles: [
@@ -46,8 +46,8 @@ function codexCatalog() {
         token_policy: "deep-synthesis-and-falsification",
       },
       {
-        id: "gpt-5.6-terra",
-        family: "gpt-5",
+        id: "gpt-6.1-terra",
+        family: "gpt-6",
         tier: "balanced",
         strengths: ["structured reasoning", "validation-code generation", "execution scaffolding"],
         suitable_roles: ["lab-director", "chronicle", "author", "illustrator", "analyst", "gatekeeper", "scout", "lab-runner"],

@@ -9,9 +9,12 @@ const ROUTE_VERSION = "codex-tier-router-v2";
 
 const CODEX_MODELS = Object.freeze([
   "gpt-5.6-luna",
+  "gpt-6.1-terra",
+  "gpt-6.1-sol",
+  "gpt-6-astra",
+  // Still accepted so a role plan persisted before 2026-10-31 stays routable.
   "gpt-5.6-terra",
   "gpt-5.6-sol",
-  "gpt-6-astra",
 ]);
 
 const NON_CODEX_RUNTIME_MODELS = Object.freeze({
@@ -67,8 +70,8 @@ function route({ model, reasoningEffort, reasons, fallbackChain }) {
 
 function effortFor(model) {
   if (model === "gpt-6-astra") return "xhigh";
-  if (model === "gpt-5.6-sol") return "high";
-  if (model === "gpt-5.6-terra") return "medium";
+  if (model === "gpt-6.1-sol" || model === "gpt-5.6-sol") return "high";
+  if (model === "gpt-6.1-terra" || model === "gpt-5.6-terra") return "medium";
   return "low";
 }
 
@@ -103,27 +106,27 @@ function baseModelFor({ role, complexity, actionType }) {
   const action = text(actionType);
   if (role === "lab-director") {
     return complexity >= 4 || /hypothesis|pivot|novelty|gate/.test(action)
-      ? "gpt-5.6-sol"
-      : "gpt-5.6-terra";
+      ? "gpt-6.1-sol"
+      : "gpt-6.1-terra";
   }
   if (role === "analyst") {
     return complexity >= 4 || /falsif|confound|recovery|comparison/.test(action)
-      ? "gpt-5.6-sol"
-      : "gpt-5.6-terra";
+      ? "gpt-6.1-sol"
+      : "gpt-6.1-terra";
   }
   if (role === "gatekeeper") {
     return complexity >= 4 || /technical|reproduc|novelty|falsif/.test(action)
-      ? "gpt-5.6-sol"
-      : "gpt-5.6-terra";
+      ? "gpt-6.1-sol"
+      : "gpt-6.1-terra";
   }
-  if (role === "lab-runner") return "gpt-5.6-terra";
-  if (role === "scout") return complexity >= 4 ? "gpt-5.6-terra" : "gpt-5.6-luna";
+  if (role === "lab-runner") return "gpt-6.1-terra";
+  if (role === "scout") return complexity >= 4 ? "gpt-6.1-terra" : "gpt-5.6-luna";
   if (role === "chronicle" || role === "author" || role === "illustrator") {
     return complexity >= 4 || /review|synthesis|revision/.test(action)
-      ? "gpt-5.6-terra"
+      ? "gpt-6.1-terra"
       : "gpt-5.6-luna";
   }
-  return "gpt-5.6-terra";
+  return "gpt-6.1-terra";
 }
 
 /**
@@ -188,11 +191,11 @@ function chooseModelRoute(input = {}) {
   reasons.push(`${role || "unspecified"} base route`, `${lengthBand} prompt`, `complexity ${complexity}`);
 
   if (lengthBand === "long" && model === "gpt-5.6-luna") {
-    model = "gpt-5.6-terra";
+    model = "gpt-6.1-terra";
     reasons.push("long prompt avoids the lightweight route");
   }
-  if (lengthBand === "long" && model === "gpt-5.6-terra" && complexity >= 4) {
-    model = "gpt-5.6-sol";
+  if (lengthBand === "long" && model === "gpt-6.1-terra" && complexity >= 4) {
+    model = "gpt-6.1-sol";
     reasons.push("long complex prompt needs deeper synthesis");
   }
 

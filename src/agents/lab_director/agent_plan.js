@@ -21,9 +21,9 @@ const {
 // the dynamic Luna/Terra/Sol/Astra router below. The Claude side retains its
 // provider-specific mapping.
 const CODEX_MODEL_PARAMETERS = Object.freeze({
-  labDirectorModel: "gpt-5.6-sol",
-  defaultCodexAgentModel: "gpt-5.6-sol",
-  labRunnerCodexModel: "gpt-5.6-terra",
+  labDirectorModel: "gpt-6.1-sol",
+  defaultCodexAgentModel: "gpt-6.1-sol",
+  labRunnerCodexModel: "gpt-6.1-terra",
 });
 
 const CLAUDE_MODEL_PARAMETERS = Object.freeze({

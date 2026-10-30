@@ -68,6 +68,8 @@ function pickModelArg(model) {
   // anything else is passed through untouched (Claude rejects unknown
   // names with a clear error, which is fine — the user sees it).
   const aliases = {
+    "gpt-6.1-sol": "claude-sonnet-4-5",
+    "gpt-6.1-terra": "claude-sonnet-4-5",
     "gpt-5.6-sol": "claude-sonnet-4-5",
     "gpt-5.6-terra": "claude-sonnet-4-5",
     "gpt-5.5": "claude-sonnet-4-5",

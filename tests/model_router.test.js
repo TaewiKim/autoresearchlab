@@ -12,8 +12,8 @@ test("catalog lists the four current Codex routing tiers", () => {
   const ids = codexCatalog().models.map((model) => model.id);
   assert.deepEqual(ids.slice(0, 4), [
     "gpt-6-astra",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
+    "gpt-6.1-sol",
+    "gpt-6.1-terra",
     "gpt-5.6-luna",
   ]);
 });
@@ -24,10 +24,10 @@ test("router assigns routine and complex work to the appropriate cost tier", () 
   }).model, "gpt-5.6-luna");
   assert.equal(chooseModelRoute({
     role: "scout", runtimeClass: "codex-agent", prompt: "Compare the literature, citations, and candidate datasets for a novel experiment.",
-  }).model, "gpt-5.6-terra");
+  }).model, "gpt-6.1-terra");
   assert.equal(chooseModelRoute({
     role: "analyst", runtimeClass: "codex-agent", complexityScore: 5, actionType: "falsification_comparison",
-  }).model, "gpt-5.6-sol");
+  }).model, "gpt-6.1-sol");
 });
 
 test("router reserves Astra for candidate synthesis and decisive adjudication", () => {
@@ -45,7 +45,7 @@ test("router reserves Astra for candidate synthesis and decisive adjudication", 
   const ordinaryReview = chooseModelRoute({
     role: "gatekeeper", runtimeClass: "codex-agent", complexityScore: 5, actionType: "technical_review",
   });
-  assert.equal(ordinaryReview.model, "gpt-5.6-sol");
+  assert.equal(ordinaryReview.model, "gpt-6.1-sol");
 
   const decisiveReview = chooseModelRoute({
     role: "gatekeeper",
@@ -59,15 +59,15 @@ test("router reserves Astra for candidate synthesis and decisive adjudication", 
 
 test("router respects pins, retries, availability fallback, and driver bypass", () => {
   const pinned = chooseModelRoute({
-    role: "scout", runtimeClass: "codex-agent", modelPin: "gpt-5.6-sol",
+    role: "scout", runtimeClass: "codex-agent", modelPin: "gpt-6.1-sol",
   });
-  assert.equal(pinned.model, "gpt-5.6-sol");
+  assert.equal(pinned.model, "gpt-6.1-sol");
   assert.match(pinned.route_reason, /explicit model pin/i);
 
   const retry = chooseModelRoute({
     role: "analyst", runtimeClass: "codex-agent", retryCount: 2, failureCategory: "invalid_structured_output",
   });
-  assert.equal(retry.model, "gpt-5.6-sol");
+  assert.equal(retry.model, "gpt-6.1-sol");
 
   const quotaFallback = chooseModelRoute({
     role: "lab-director",
@@ -77,7 +77,7 @@ test("router respects pins, retries, availability fallback, and driver bypass", 
     candidateCount: 3,
     failureCategory: "quota_exceeded",
   });
-  assert.equal(quotaFallback.model, "gpt-5.6-sol");
+  assert.equal(quotaFallback.model, "gpt-6.1-sol");
 
   const driver = chooseModelRoute({
     role: "lab-runner", runtimeClass: "external-driver", laneMode: "driver-exec",
@@ -98,7 +98,7 @@ test("agent and role plans retain assigned_model alongside model_route", () => {
   const runner = plan.agents.find((agent) => agent.role === "lab-runner");
   assert.equal(director.model, "gpt-6-astra");
   assert.equal(director.model_route.route_version, ROUTE_VERSION);
-  assert.equal(chronicle.model, "gpt-5.6-terra");
+  assert.equal(chronicle.model, "gpt-6.1-terra");
   assert.equal(runner.model, "python-external-driver");
 
   const rolePlan = buildRolePlan({
@@ -134,10 +134,10 @@ test("pins never authorize an automatic model change on long or failed work", ()
 test("runtime failures preserve the tier while response-quality failures may escalate", () => {
   for (const failureCategory of ["timeout", "context_window_exceeded", "context_length_exceeded", "invalid_json_schema"]) {
     assert.equal(chooseModelRoute({ role: "analyst", complexityScore: 2, retryCount: 3,
-      failureCategory }).model, "gpt-5.6-terra", failureCategory);
+      failureCategory }).model, "gpt-6.1-terra", failureCategory);
   }
   assert.equal(chooseModelRoute({ role: "analyst", complexityScore: 2, retryCount: 2,
-    failureCategory: "invalid_structured_output" }).model, "gpt-5.6-sol");
+    failureCategory: "invalid_structured_output" }).model, "gpt-6.1-sol");
 });
 
 test("long evidence and candidate inventories do not imply a hard synthesis task", () => {
@@ -145,11 +145,11 @@ test("long evidence and candidate inventories do not imply a hard synthesis task
   for (const estimatedPromptBytes of [undefined, null, ""]) {
     const selected = chooseModelRoute({ role: "scout", complexityScore: 1,
       prompt: longEvidence, estimatedPromptBytes });
-    assert.equal(selected.model, "gpt-5.6-terra");
+    assert.equal(selected.model, "gpt-6.1-terra");
     assert.match(selected.route_reason, /long prompt/);
   }
   const inventory = chooseModelRoute({ role: "lab-director", complexityScore: 5,
     actionType: "status_digest", candidateCount: 20 });
-  assert.equal(inventory.model, "gpt-5.6-sol");
+  assert.equal(inventory.model, "gpt-6.1-sol");
   assert.ok(!inventory.fallback_chain.includes("gpt-6-astra"));
 });

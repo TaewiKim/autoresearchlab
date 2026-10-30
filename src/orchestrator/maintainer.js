@@ -55,7 +55,7 @@ const { HEALTH_KIND, pipelineHealthFindings, writeHealthReport } = require("./pi
 const { repairQueuedAnalystContracts } = require("../policy/analysis_contract");
 const { codexLoginRevoked, readCodexLoginRequired, recordCodexLoginRequired } = require("./codex_login");
 
-const DEFAULT_MODEL = "gpt-5.6-sol";
+const DEFAULT_MODEL = "gpt-6.1-sol";
 // The supervisor's attempts are limited per WEEK, not per cycle. A cycle runs for
 // weeks and finds new defects all along; a total fixed at the start leaves it
 // unattended for the rest of its life once spent.

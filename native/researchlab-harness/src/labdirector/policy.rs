@@ -10,12 +10,12 @@ use std::env;
 // supervisor's runtime-created followup lanes ship the same provider as
 // the JS-side initial agent plan (codex catalogue vs claude catalogue).
 // These MUST stay in sync with src/agents/lab_director/agent_plan.js.
-pub(crate) const CODEX_LAB_DIRECTOR_MODEL: &str = "gpt-5.6-sol";
-pub(crate) const CODEX_DEFAULT_AGENT_MODEL: &str = "gpt-5.6-sol";
-pub(crate) const CODEX_ANALYST_MODEL: &str = "gpt-5.6-sol";
-pub(crate) const CODEX_LAB_RUNNER_MODEL: &str = "gpt-5.6-terra";
+pub(crate) const CODEX_LAB_DIRECTOR_MODEL: &str = "gpt-6.1-sol";
+pub(crate) const CODEX_DEFAULT_AGENT_MODEL: &str = "gpt-6.1-sol";
+pub(crate) const CODEX_ANALYST_MODEL: &str = "gpt-6.1-sol";
+pub(crate) const CODEX_LAB_RUNNER_MODEL: &str = "gpt-6.1-terra";
 pub(crate) const CODEX_ASTRA_MODEL: &str = "gpt-6-astra";
-pub(crate) const CODEX_TERRA_MODEL: &str = "gpt-5.6-terra";
+pub(crate) const CODEX_TERRA_MODEL: &str = "gpt-6.1-terra";
 pub(crate) const CODEX_LUNA_MODEL: &str = "gpt-5.6-luna";
 
 pub(crate) const CLAUDE_LAB_DIRECTOR_MODEL: &str = "claude-opus-4-7";

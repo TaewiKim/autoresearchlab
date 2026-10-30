@@ -42,7 +42,7 @@ search, title matching and citation graph.
 | OpenAI Responses API `api.openai.com/v1/responses` | Optional research-LLM helper in the analysis driver | `RESEARCHLAB_LUNA_API_KEY`, else `OPENAI_API_KEY` (optional) |
 | Claude Code CLI (`claude -p`) | Alternative lane runtime, `--agent-runtime claude` | `claude` login or `ANTHROPIC_API_KEY` (optional) |
 
-Models used by default: `gpt-5.6-sol` and `gpt-5.6-terra` through the Codex CLI
+Models used by default: `gpt-6.1-sol` and `gpt-6.1-terra` through the Codex CLI
 (Codex 0.144.1 or newer is required for them).
 
 ## Literature search (scout lanes)

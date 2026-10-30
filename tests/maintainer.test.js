@@ -559,7 +559,7 @@ test("codex runs once in its own worktree, workspace-write, no network, sol at h
   const args = codexCalls[0];
   for (const expected of [
     ["--sandbox", "workspace-write"],
-    ["--model", "gpt-5.6-sol"],
+    ["--model", "gpt-6.1-sol"],
     ["--cd", path.join(cycleWorktreesDir(fixture), outcome.run_id, "pkg")],
   ]) {
     assert.equal(path.resolve(args[args.indexOf(expected[0]) + 1]), path.resolve(expected[1]));
@@ -1217,7 +1217,7 @@ test("docker argv: repository read-only, only the worktree and run dir writable,
   const runDir = "D:\\projects\\researchlab\\researchlab\\.research-lab\\maintenance\\cycle-b-20260919\\run-02-x";
   const workdir = `${worktreeRoot}\\researchlab`;
   const codexArgs = __private.codexArgs({
-    model: "gpt-5.6-sol",
+    model: "gpt-6.1-sol",
     lastMessagePath: `${runDir}\\last-message.json`,
     schemaPath: `${runDir}\\output-schema.json`,
     cwd: workdir,
