@@ -16,7 +16,7 @@ pub(crate) const CODEX_ANALYST_MODEL: &str = "gpt-6.1-sol";
 pub(crate) const CODEX_LAB_RUNNER_MODEL: &str = "gpt-6.1-terra";
 pub(crate) const CODEX_ASTRA_MODEL: &str = "gpt-6-astra";
 pub(crate) const CODEX_TERRA_MODEL: &str = "gpt-6.1-terra";
-pub(crate) const CODEX_LUNA_MODEL: &str = "gpt-5.6-luna";
+pub(crate) const CODEX_LUNA_MODEL: &str = "gpt-6-luna";
 
 pub(crate) const CLAUDE_LAB_DIRECTOR_MODEL: &str = "claude-opus-4-7";
 pub(crate) const CLAUDE_DEFAULT_AGENT_MODEL: &str = "claude-sonnet-4-6";

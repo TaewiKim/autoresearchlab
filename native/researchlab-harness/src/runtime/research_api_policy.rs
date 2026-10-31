@@ -3,7 +3,7 @@
 use std::ffi::{OsStr, OsString};
 use std::process::Command;
 
-pub(crate) const RESEARCH_API_MODEL: &str = "gpt-5.6-luna";
+pub(crate) const RESEARCH_API_MODEL: &str = "gpt-6-luna";
 const PROVIDER_KEYS: &[&str] = &[
     "RESEARCHLAB_LUNA_API_KEY",
     "OPENAI_API_KEY",

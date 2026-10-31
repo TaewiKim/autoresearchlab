@@ -1,6 +1,6 @@
 "use strict";
 
-const RESEARCH_API_MODEL = "gpt-5.6-luna";
+const RESEARCH_API_MODEL = "gpt-6-luna";
 const RESEARCH_API_POLICY = Object.freeze({
   policy_version: "research-api-luna-only-v1",
   allowed_models: Object.freeze([RESEARCH_API_MODEL]),
@@ -28,7 +28,7 @@ const MODEL_ENV_KEYS = new Set([
 ]);
 
 function assertResearchApiModel(model) {
-  if (model !== RESEARCH_API_MODEL) throw new Error("Research model API calls require exactly gpt-5.6-luna.");
+  if (model !== RESEARCH_API_MODEL) throw new Error("Research model API calls require exactly gpt-6-luna.");
   return model;
 }
 
@@ -43,6 +43,6 @@ function usesDirectModelApi(input = {}) {
     .some((value) => ["api", "direct-api", "model-api", "api-key", "api_key"].includes(String(value || "").toLowerCase()));
 }
 
-const RESEARCH_API_INSTRUCTION = "Research model API policy: direct paid model calls must use drivers/analysis/research_llm.py with exactly gpt-5.6-luna. Other models/providers and automatic model fallback are prohibited. Codex CLI uses ChatGPT authentication and retains its subscription model routing. Literature metadata APIs are outside this model restriction.";
+const RESEARCH_API_INSTRUCTION = "Research model API policy: direct paid model calls must use drivers/analysis/research_llm.py with exactly gpt-6-luna. Other models/providers and automatic model fallback are prohibited. Codex CLI uses ChatGPT authentication and retains its subscription model routing. Literature metadata APIs are outside this model restriction.";
 
 module.exports = { RESEARCH_API_MODEL, RESEARCH_API_POLICY, RESEARCH_API_INSTRUCTION, MODEL_ENV_KEYS, assertResearchApiModel, codexSubscriptionEnvironment, usesDirectModelApi };

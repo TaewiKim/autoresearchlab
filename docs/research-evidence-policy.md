@@ -1,6 +1,6 @@
 # Research evidence and model usage
 
-Research model API calls are restricted to exactly `gpt-5.6-luna` through
+Research model API calls are restricted to exactly `gpt-6-luna` through
 `drivers/analysis/research_llm.py`. Other models/providers, endpoint overrides,
 redirects and automatic model fallback are rejected. Research subprocesses remove
 generic provider credentials; the helper receives only the scoped OpenAI key.

@@ -54,7 +54,7 @@ function codexCatalog() {
         token_policy: "default-structured-agent-work",
       },
       {
-        id: "gpt-5.6-luna",
+        id: "gpt-6-luna",
         family: "gpt-5",
         tier: "efficient",
         strengths: ["high-volume triage", "query refinement", "summarization", "routine formatting"],

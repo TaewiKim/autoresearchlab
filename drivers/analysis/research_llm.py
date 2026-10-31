@@ -11,7 +11,7 @@ import os
 from urllib import error, request
 
 
-RESEARCH_API_MODEL = "gpt-5.6-luna"
+RESEARCH_API_MODEL = "gpt-6-luna"
 RESEARCH_API_ENDPOINT = "https://api.openai.com/v1/responses"
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
@@ -89,7 +89,7 @@ def create_response(
     Credentials are read at call time and never included in returned errors.
     """
     if not isinstance(model, str) or model != RESEARCH_API_MODEL:
-        raise ValueError("Research model API calls require exactly gpt-5.6-luna.")
+        raise ValueError("Research model API calls require exactly gpt-6-luna.")
     if not isinstance(input_text, str) or not input_text.strip():
         raise ValueError("Research API input must be nonempty text.")
     if instructions is not None and not isinstance(instructions, str):

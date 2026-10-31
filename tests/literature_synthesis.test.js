@@ -36,7 +36,7 @@ function screenedPaper(paper, objective, { established = false } = {}) {
         objective_hash: hash(objective),
         abstract_sha256: hash(abstract),
         abstract_read_in_full: true,
-        reviewer: { kind: "codex_cli", identity: "gpt-5.6-luna" },
+        reviewer: { kind: "codex_cli", identity: "gpt-6-luna" },
         reviewed_at: "2026-01-01T00:00:00Z",
         decision: "directly_relevant",
         // Per paper: a reason reused word-for-word across papers is now read as

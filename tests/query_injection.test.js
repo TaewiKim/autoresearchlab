@@ -86,7 +86,7 @@ test("restart preserves a same-objective adaptive Scout plan with a literature c
     ensureDir(path.join(root, "plans"));
     ensureDir(path.join(root, "state"));
     const manifestPath = path.join(root, "plans", `${cycleId}-lane-manifest.json`);
-    writeJson(manifestPath, [{ lane_id: "scout-02", role: "scout", model: "gpt-5.6-luna" }]);
+    writeJson(manifestPath, [{ lane_id: "scout-02", role: "scout", model: "gpt-6-luna" }]);
     const authoredPlan = {
       lane_id: "scout-02",
       role: "scout",

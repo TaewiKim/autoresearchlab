@@ -8,11 +8,12 @@ const { RESEARCH_API_MODEL, usesDirectModelApi } = require("./research_api");
 const ROUTE_VERSION = "codex-tier-router-v2";
 
 const CODEX_MODELS = Object.freeze([
-  "gpt-5.6-luna",
+  "gpt-6-luna",
   "gpt-6.1-terra",
   "gpt-6.1-sol",
   "gpt-6-astra",
   // Still accepted so a role plan persisted before 2026-10-31 stays routable.
+  "gpt-5.6-luna",
   "gpt-5.6-terra",
   "gpt-5.6-sol",
 ]);
@@ -120,11 +121,11 @@ function baseModelFor({ role, complexity, actionType }) {
       : "gpt-6.1-terra";
   }
   if (role === "lab-runner") return "gpt-6.1-terra";
-  if (role === "scout") return complexity >= 4 ? "gpt-6.1-terra" : "gpt-5.6-luna";
+  if (role === "scout") return complexity >= 4 ? "gpt-6.1-terra" : "gpt-6-luna";
   if (role === "chronicle" || role === "author" || role === "illustrator") {
     return complexity >= 4 || /review|synthesis|revision/.test(action)
       ? "gpt-6.1-terra"
-      : "gpt-5.6-luna";
+      : "gpt-6-luna";
   }
   return "gpt-6.1-terra";
 }
@@ -190,7 +191,7 @@ function chooseModelRoute(input = {}) {
   let model = baseModelFor({ role, complexity, actionType: input.actionType || input.action_type });
   reasons.push(`${role || "unspecified"} base route`, `${lengthBand} prompt`, `complexity ${complexity}`);
 
-  if (lengthBand === "long" && model === "gpt-5.6-luna") {
+  if (lengthBand === "long" && model === "gpt-6-luna") {
     model = "gpt-6.1-terra";
     reasons.push("long prompt avoids the lightweight route");
   }

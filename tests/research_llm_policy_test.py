@@ -42,7 +42,7 @@ class ResearchLLMPolicyTest(unittest.TestCase):
         self.assertEqual(req.method, "POST")
         self.assertEqual(req.get_header("Authorization"), "Bearer test-secret")
         self.assertEqual(json.loads(req.data), {
-            "model": "gpt-5.6-luna", "input": "Compare the falsifiable predictions.",
+            "model": "gpt-6-luna", "input": "Compare the falsifiable predictions.",
             "instructions": "Cite evidence.", "max_output_tokens": 256, "store": False,
         })
         self.assertEqual(result["id"], "offline-result")
@@ -50,11 +50,11 @@ class ResearchLLMPolicyTest(unittest.TestCase):
         transport.assert_called_once()
 
     def test_other_models_are_rejected_before_transport_or_credentials(self):
-        for model in ["gpt-5.6-sol", "gpt-6-astra", "gpt-5.6-terra", "gpt-5.6-luna-2026-09-06",
-                      " gpt-5.6-luna", "gpt-5.6-luna ", "GPT-5.6-LUNA", "other", None]:
+        for model in ["gpt-5.6-sol", "gpt-6-astra", "gpt-5.6-terra", "gpt-6-luna-2026-09-06",
+                      " gpt-6-luna", "gpt-6-luna ", "GPT-6-LUNA", "other", None]:
             with self.subTest(model=model):
                 transport = Mock()
-                with self.assertRaisesRegex(ValueError, "exactly gpt-5.6-luna"):
+                with self.assertRaisesRegex(ValueError, "exactly gpt-6-luna"):
                     llm.create_response("Test", model=model, environ={}, transport=transport)
                 transport.assert_not_called()
 
@@ -130,7 +130,7 @@ class ResearchLLMPolicyTest(unittest.TestCase):
         result = llm.research_api_environment(original)
         self.assertEqual(original, before)
         self.assertEqual(result, {
-            "RESEARCHLAB_LUNA_API_KEY": "test-secret", "RESEARCHLAB_API_MODEL": "gpt-5.6-luna",
+            "RESEARCHLAB_LUNA_API_KEY": "test-secret", "RESEARCHLAB_API_MODEL": "gpt-6-luna",
             "PATH": "original-path", "RESEARCHLAB_CYCLE_ID": "cycle", "SCOPUS_API_KEY": "literature-key",
         })
         self.assertIsNot(result, original)
@@ -138,7 +138,7 @@ class ResearchLLMPolicyTest(unittest.TestCase):
 
     def test_environment_without_key_does_not_create_credentials(self):
         self.assertEqual(llm.research_api_environment({"PATH": "x"}),
-                         {"PATH": "x", "RESEARCHLAB_API_MODEL": "gpt-5.6-luna"})
+                         {"PATH": "x", "RESEARCHLAB_API_MODEL": "gpt-6-luna"})
 
     def test_all_common_model_credentials_are_removed(self):
         original = {name: "credential" for name in llm.LLM_PROVIDER_CREDENTIAL_KEYS}
@@ -195,7 +195,7 @@ class ResearchChildEnvironmentTest(unittest.TestCase):
             self.assertNotIn("OPENAI_API_KEY", child_env)
             self.assertNotIn("GEMINI_API_KEY", child_env)
             self.assertTrue(child_env.get("RESEARCHLAB_LUNA_API_KEY"))
-            self.assertEqual(child_env["RESEARCHLAB_API_MODEL"], "gpt-5.6-luna")
+            self.assertEqual(child_env["RESEARCHLAB_API_MODEL"], "gpt-6-luna")
             self.assertEqual(child_env["RESEARCHLAB_KEEP"], "preserved")
             helper_dir = str(PROJECT / "drivers" / "analysis")
             self.assertEqual(child_env["PYTHONPATH"], helper_dir + os.pathsep + "existing-import-path")
@@ -205,7 +205,7 @@ class ResearchChildEnvironmentTest(unittest.TestCase):
                 [sys.executable, "-c", "import research_llm; print(research_llm.RESEARCH_API_MODEL)"],
                 env=child_env, cwd=root, capture_output=True, text=True, check=True,
             )
-            self.assertEqual(probe.stdout.strip(), "gpt-5.6-luna")
+            self.assertEqual(probe.stdout.strip(), "gpt-6-luna")
 
     def test_driver_modules_import_with_both_entrypoint_layouts(self):
         for path, package in [(PROJECT, "drivers.analysis.python_stats_lib"),

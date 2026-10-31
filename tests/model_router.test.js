@@ -14,14 +14,14 @@ test("catalog lists the four current Codex routing tiers", () => {
     "gpt-6-astra",
     "gpt-6.1-sol",
     "gpt-6.1-terra",
-    "gpt-5.6-luna",
+    "gpt-6-luna",
   ]);
 });
 
 test("router assigns routine and complex work to the appropriate cost tier", () => {
   assert.equal(chooseModelRoute({
     role: "chronicle", runtimeClass: "codex-agent", prompt: "Summarize the new evidence.",
-  }).model, "gpt-5.6-luna");
+  }).model, "gpt-6-luna");
   assert.equal(chooseModelRoute({
     role: "scout", runtimeClass: "codex-agent", prompt: "Compare the literature, citations, and candidate datasets for a novel experiment.",
   }).model, "gpt-6.1-terra");
@@ -108,7 +108,7 @@ test("agent and role plans retain assigned_model alongside model_route", () => {
       role: "chronicle",
       runtime_class: "codex-agent",
       lane_mode: "read-write-scoped",
-      model: "gpt-5.6-luna",
+      model: "gpt-6-luna",
       model_route: chronicle.model_route,
     },
     cycleId: "router-test",
@@ -118,16 +118,16 @@ test("agent and role plans retain assigned_model alongside model_route", () => {
 });
 
 test("pins never authorize an automatic model change on long or failed work", () => {
-  const selected = chooseModelRoute({ role: "lab-director", modelPin: "gpt-5.6-luna",
+  const selected = chooseModelRoute({ role: "lab-director", modelPin: "gpt-6-luna",
     actionType: "hypothesis_tournament", candidateCount: 5, complexityScore: 6,
     prompt: "hypothesis ".repeat(20_000), retryCount: 3, failureCategory: "quota_exceeded" });
-  assert.equal(selected.model, "gpt-5.6-luna");
+  assert.equal(selected.model, "gpt-6-luna");
   assert.deepEqual(selected.fallback_chain, []);
   assert.throws(() => chooseModelRoute({ modelPin: "unverified-model" }), /unsupported Codex model pin/);
   const plan = buildRolePlan({ prompt: "Summarize new evidence.", cycleId: "pin-update",
     lane: { lane_id: "chronicle-01", role: "chronicle", runtime_class: "codex-agent",
-      model_pin: "gpt-5.6-luna", model_route: { model: "gpt-6-astra", reasoning_effort: "xhigh" } } });
-  assert.equal(plan.assigned_model, "gpt-5.6-luna");
+      model_pin: "gpt-6-luna", model_route: { model: "gpt-6-astra", reasoning_effort: "xhigh" } } });
+  assert.equal(plan.assigned_model, "gpt-6-luna");
   assert.deepEqual(plan.model_route.fallback_chain, []);
 });
 
