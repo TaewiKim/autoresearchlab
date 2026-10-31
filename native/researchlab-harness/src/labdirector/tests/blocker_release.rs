@@ -183,6 +183,19 @@ fn a_stall_ages_while_its_blockers_hold_and_resets_when_they_change() {
         "the stall record must name who could clear it",
     );
 
+    // Another lane joining the same blocker is the stall growing, not the cycle
+    // moving: it must not restart the clock (cycle-a-20260919, 2026-10-31).
+    let grown = vec![
+        held[0].clone(),
+        (
+            "followup-analyst-04".to_string(),
+            DependencyBlocker::describe("waiting-for-literature-scout scout_literature_completed=0".into()),
+        ),
+    ];
+    record_dependency_stall(&paths, cycle, &grown);
+    let grown_stall = read_json(&dependency_stall_path(&paths, cycle)).unwrap();
+    assert_eq!(grown_stall.get("first_seen").and_then(Value::as_str), Some(first_seen.as_str()));
+
     // Blockers that change mean the cycle is moving, even before a lane launches.
     let moved = vec![(
         "followup-analyst-03".to_string(),

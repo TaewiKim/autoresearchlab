@@ -490,15 +490,23 @@ pub(crate) fn clear_dependency_stall(paths: &AppPaths, cycle_id: &str) {
     }
 }
 
-/// The same set of lanes held for the same reasons is the same stall. A cycle
+/// The same reasons holding the same kinds of lane is the same stall. A cycle
 /// whose blockers change is making progress of a kind, even when no lane has
 /// launched yet, so it should not accumulate age.
+///
+/// MEASURED ON cycle-a-20260919, 2026-10-31: the signature named every
+/// held lane, and each supervisor pass added one more analyst waiting for the
+/// same missing hypothesis. The signature changed every 38 minutes, `first_seen`
+/// restarted every time, and a stall that had lasted 13 hours never reached the
+/// hour that escalates it. A lane joining a blocker that already holds others is
+/// the stall growing, not the cycle moving, so lanes are not part of the identity.
 fn stall_signature(blocked: &[(String, DependencyBlocker)]) -> String {
     let mut parts = blocked
         .iter()
-        .map(|(lane_id, blocker)| format!("{lane_id}|{}", blocker.reason))
+        .map(|(_, blocker)| format!("{}|{}", blocker.awaited_role.as_deref().unwrap_or(""), blocker.reason))
         .collect::<Vec<_>>();
     parts.sort();
+    parts.dedup();
     parts.join("\n")
 }
 
