@@ -371,7 +371,7 @@ pub(crate) fn collect_dependency_stall_recovery_actions(
         "preferred_role": "lab-director",
         "priority": "critical",
         "description": format!(
-            "No lane has run for {}s and all {} pending lane(s) are held on dependency blockers: {}. Decide, for each: change the lead or the plan so the blocker can actually clear, dispatch whatever would clear it, or release the gate by recording a `dependency_gate_override` with the exact blocker string and your rationale. An override is a door, not a rewrite -- forbidden dataset reuse cannot be released this way, and a blanket or wildcard target releases nothing.",
+            "No lane has run for {}s and all {} pending lane(s) are held on dependency blockers: {}. Decide, for each: change the lead or the plan so the blocker can actually clear, dispatch whatever would clear it, or release the gate by recording a `dependency_gate_override` with the exact blocker string and your rationale. An override is a door, not a rewrite -- forbidden dataset reuse cannot be released this way, and a blanket or wildcard target releases nothing. A lane that can no longer be useful (for example an analysis assigned to a lead you have withdrawn, with no successor) is closed by listing it in `blocked_lane_retirements` in your decision, as [{{\"lane_id\": \"...\", \"reason\": \"...\"}}]; only lanes named above can be retired, a reason is required, and the document lanes (author, illustrator) cannot be retired this way. Prose dispositions in a file of your own are not read by the harness.",
             stalled_seconds,
             lanes.len(),
             lanes.join(", ")

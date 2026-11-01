@@ -702,6 +702,10 @@ pub fn run_plan(
 
             if launched_this_round == 0 && active_running_lanes == 0 && !blocked_this_round.is_empty()
             {
+                // The director's answer to an earlier stall may have closed some
+                // of these lanes; what remains is the stall.
+                blocked_this_round =
+                    retire_blocked_lanes_for_director(paths, cycle_id, std::mem::take(&mut blocked_this_round));
                 record_dependency_stall(paths, cycle_id, &blocked_this_round);
             } else {
                 clear_dependency_stall(paths, cycle_id);

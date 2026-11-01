@@ -871,3 +871,103 @@ fn the_blockers_an_analyst_really_owns_are_untouched() {
         );
     }
 }
+
+// MEASURED ON cycle-a-20260919, 2026-11-01: forty directors in a row
+// ruled on a stall of 64 lanes, withdrew the lead and named no successor, and
+// recorded in their own result what to do with each lane. The harness read the
+// hypothesis and research-notes artifacts only, which such a director never
+// writes, so none of it was applied and the stall re-escalated every hour.
+
+fn seed_lane(paths: &AppPaths, cycle: &str, lane_id: &str, role: &str) -> PathBuf {
+    let dir = lane_root(paths, cycle, lane_id);
+    fs::create_dir_all(&dir).unwrap();
+    write_json(&dir.join("lane-contract.json"), &json!({ "lane_id": lane_id, "role": role })).unwrap();
+    write_json(&dir.join("role-plan.json"), &json!({ "role": role })).unwrap();
+    dir
+}
+
+fn seed_completed_director(paths: &AppPaths, cycle: &str, decision: Value) {
+    let dir = seed_lane(paths, cycle, "followup-lab-director-9", "lab-director");
+    write_json(
+        &dir.join("final-status.json"),
+        &json!({ "lane_id": "followup-lab-director-9", "status": "completed", "completed_at": now_iso() }),
+    )
+    .unwrap();
+    write_json(&dir.join("result.json"), &json!({ "extracted_json": decision })).unwrap();
+}
+
+#[test]
+fn a_director_closes_the_blocked_lanes_it_retires_and_no_others() {
+    let temp = TempDir::new().unwrap();
+    let paths = build_paths(temp.path());
+    let cycle = "cg-retire";
+    fs::create_dir_all(state_root(&paths)).unwrap();
+    for (lane, role) in [
+        ("followup-analyst-1", "analyst"),
+        ("followup-analyst-2", "analyst"),
+        ("followup-analyst-3", "analyst"),
+        ("author-01", "author"),
+    ] {
+        seed_lane(&paths, cycle, lane, role);
+    }
+    seed_completed_director(
+        &paths,
+        cycle,
+        json!({
+            "blocked_lane_retirements": [
+                { "lane_id": "followup-analyst-1", "reason": "assigned to the withdrawn lead" },
+                { "lane_id": "author-01", "reason": "the paper is not coming" },
+                { "lane_id": "followup-analyst-9", "reason": "not blocked, so not retirable" },
+                { "lane_id": "followup-analyst-2", "reason": "  " },
+            ],
+        }),
+    );
+    let blocker = |text: &str| DependencyBlocker::describe(text.to_string());
+    let blocked = vec![
+        ("followup-analyst-1".to_string(), blocker("waiting-for-lab-director-hypothesis artifact_exists=false path=x")),
+        ("followup-analyst-2".to_string(), blocker("waiting-for-lab-director-hypothesis artifact_exists=false path=x")),
+        ("followup-analyst-3".to_string(), blocker("waiting-for-lab-director-hypothesis artifact_exists=false path=x")),
+        ("author-01".to_string(), blocker("waiting-for-hypothesis-gate gate_passed=false")),
+    ];
+    let kept = retire_blocked_lanes_for_director(&paths, cycle, blocked);
+    let kept_ids = kept.iter().map(|(lane, _)| lane.as_str()).collect::<Vec<_>>();
+    assert_eq!(
+        kept_ids,
+        vec!["followup-analyst-2", "followup-analyst-3", "author-01"],
+        "a reasonless entry, an unnamed lane and a document lane stay held",
+    );
+
+    let closed = read_json(&lane_root(&paths, cycle, "followup-analyst-1").join("final-status.json")).unwrap();
+    assert_eq!(closed.get("status").and_then(Value::as_str), Some("aborted"));
+    assert_eq!(closed.get("retired_by").and_then(Value::as_str), Some("lab-director"));
+    assert_eq!(
+        closed.get("retirement_reason").and_then(Value::as_str),
+        Some("assigned to the withdrawn lead"),
+    );
+    assert!(!lane_root(&paths, cycle, "author-01").join("final-status.json").exists());
+    assert!(!lane_root(&paths, cycle, "followup-analyst-9").exists());
+
+    let record = read_json(&state_root(&paths).join(format!("{cycle}-dependency-lane-retirements.json"))).unwrap();
+    assert_eq!(record.get("retired").and_then(Value::as_array).map(Vec::len), Some(1));
+}
+
+#[test]
+fn a_withdrawing_directors_override_releases_its_blocker_without_a_hypothesis_artifact() {
+    let temp = TempDir::new().unwrap();
+    let paths = build_paths(temp.path());
+    let cycle = "cg-override-from-result";
+    fs::create_dir_all(state_root(&paths)).unwrap();
+    seed_completed_director(
+        &paths,
+        cycle,
+        json!({
+            "dependency_gate_override": {
+                "approved": true,
+                "blocker": "waiting-for-lab-director-hypothesis",
+                "rationale": "a local audit needs no selected hypothesis",
+            },
+        }),
+    );
+    assert!(dependency_gate_override_for(&paths, cycle, "waiting-for-lab-director-hypothesis artifact_exists=false path=x").is_some());
+    assert!(dependency_gate_override_for(&paths, cycle, "waiting-for-core-experiments x=0").is_none());
+}

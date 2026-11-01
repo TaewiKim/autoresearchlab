@@ -316,7 +316,137 @@ pub(crate) fn dependency_gate_override_for(
             }
         }
     }
+    // The newest director's own decision, which the artifacts above do not carry
+    // when it withdrew the lead and chose no successor. See latest_director_decision.
+    if let Some(decision) = latest_director_decision(paths, cycle_id) {
+        if let Some(block) = decision.get("dependency_gate_override") {
+            for entry in override_entries(block) {
+                if override_entry_releases(&entry, reason, &forbidden_terms) {
+                    return Some(entry);
+                }
+            }
+        }
+    }
     None
+}
+
+/// The newest completed director's own decision.
+///
+/// MEASURED ON cycle-a-20260919, 2026-11-01: `dependency_gate_override_for`
+/// reads only the hypothesis and research-notes artifacts, and a director that
+/// withdraws the lead and names no successor writes neither -- they had not been
+/// touched since 2026-10-30 while forty directors ruled on the stall. Every
+/// override and disposition they recorded sat in their own result and was never
+/// read, so the stall re-escalated to a new director each hour. The decision that
+/// answers a stall is read from where it is written.
+fn latest_director_decision(paths: &AppPaths, cycle_id: &str) -> Option<Value> {
+    completed_labdirector_requery_payloads(paths, cycle_id)
+        .ok()?
+        .into_iter()
+        .next()
+        .map(|(_, payload)| payload)
+}
+
+/// Blocked lanes the newest director has retired, with the reason it gave.
+///
+/// A dependency stall used to offer the director three answers: change the plan so
+/// the blocker can clear, dispatch whatever would clear it, or release the gate. A
+/// lane waiting on a hypothesis the director has just withdrawn, with no successor,
+/// has none of those: nothing can clear it and releasing it would run an analysis
+/// the director has ruled out. It is closed, and that is the director's to say.
+/// Only a lane that is blocked right now can be retired (see
+/// `retire_blocked_lanes_for_director`), and a reason is required.
+pub(crate) fn director_lane_retirements(paths: &AppPaths, cycle_id: &str) -> Vec<(String, String)> {
+    let Some(decision) = latest_director_decision(paths, cycle_id) else {
+        return Vec::new();
+    };
+    let entries = match decision.get("blocked_lane_retirements") {
+        Some(Value::Array(items)) => items.clone(),
+        Some(item @ Value::Object(_)) => vec![item.clone()],
+        _ => return Vec::new(),
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let lane_id = entry.get("lane_id").and_then(Value::as_str)?.trim();
+            let reason = entry.get("reason").and_then(Value::as_str)?.trim();
+            (!lane_id.is_empty() && !reason.is_empty())
+                .then(|| (lane_id.to_string(), reason.to_string()))
+        })
+        .collect()
+}
+
+/// Close the blocked lanes the director retired, and return the rest.
+///
+/// A document lane (author, illustrator) is never closed here: whether the paper
+/// gets written is the owner's gate, not a way to clear a stall. A lane that is
+/// running, already finished, or not in `blocked` is left alone.
+pub(crate) fn retire_blocked_lanes_for_director(
+    paths: &AppPaths,
+    cycle_id: &str,
+    blocked: Vec<(String, DependencyBlocker)>,
+) -> Vec<(String, DependencyBlocker)> {
+    let retirements = director_lane_retirements(paths, cycle_id);
+    if retirements.is_empty() {
+        return blocked;
+    }
+    let record_path = state_root(paths).join(format!("{cycle_id}-dependency-lane-retirements.json"));
+    let mut record = read_json(&record_path)
+        .ok()
+        .and_then(|value| value.get("retired").and_then(Value::as_array).cloned())
+        .unwrap_or_default();
+    let mut kept = Vec::new();
+    for (lane_id, blocker) in blocked {
+        let Some((_, reason)) = retirements.iter().find(|(id, _)| *id == lane_id) else {
+            kept.push((lane_id, blocker));
+            continue;
+        };
+        let role_plan_path = lane_role_plan_path(paths, cycle_id, &lane_id);
+        let Some(lane_dir) = role_plan_path.parent().map(PathBuf::from) else {
+            kept.push((lane_id, blocker));
+            continue;
+        };
+        let role = read_json(&lane_dir.join("lane-contract.json"))
+            .ok()
+            .and_then(|contract| contract.get("role").and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_default();
+        let final_status_path = lane_dir.join("final-status.json");
+        if matches!(role.as_str(), "author" | "illustrator" | "")
+            || final_status_path.exists()
+            || lane_dir.join("run-state.json").exists()
+        {
+            kept.push((lane_id, blocker));
+            continue;
+        }
+        let status = json!({
+            "lane_id": lane_id,
+            "status": "aborted",
+            "completed_at": now_iso(),
+            "degraded": true,
+            "failure_category": "director_retired_blocked_lane",
+            "role_plan_path": role_plan_path,
+            "blocker": blocker.reason,
+            "retired_by": "lab-director",
+            "retirement_reason": reason,
+        });
+        if write_json(&final_status_path, &status).is_err() {
+            kept.push((lane_id, blocker));
+            continue;
+        }
+        record.push(json!({
+            "recorded_at": now_iso(),
+            "lane_id": lane_id,
+            "role": role,
+            "blocker": blocker.reason,
+            "reason": reason,
+            "retired_by": "lab-director",
+        }));
+    }
+    let _ = write_json(
+        &record_path,
+        &json!({ "cycle_id": cycle_id, "updated_at": now_iso(), "retired": record }),
+    );
+    kept
 }
 
 /// One override, or a list of them -- a director releasing two dead ends in one
