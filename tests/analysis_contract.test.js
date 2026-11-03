@@ -321,3 +321,13 @@ test("a result-informed lead rewrite retains measurements of the same registered
   assert.doesNotMatch(analyst.followup_description,/exactly one new immutable validation run/);
   assert.match(analyst.followup_description,/runs no further primary execution of this measurement specification/);
 });
+test("a withdrawn lead has no analysis contract, and a missing one is still an error", () => {
+  // MEASURED ON cycle-a-20260919, 2026-11-02: a director withdrew the lead
+  // and chose no successor; the projection recorded status "withdrawn" with no
+  // selected_hypothesis, and the throw below took the cycle process down twice.
+  const f = fixture(), hypothesis = path.join(f.root, "state", "c-lab-director-hypothesis.json");
+  f.write(hypothesis, { status: "withdrawn", selected_hypothesis: null, withdrawn_hypothesis: { statement: "gone" } });
+  assert.equal(currentAnalysisContract(f.root, "c"), null);
+  f.write(hypothesis, { status: "selected" });
+  assert.throws(() => currentAnalysisContract(f.root, "c"), /no readable canonical hypothesis/);
+});

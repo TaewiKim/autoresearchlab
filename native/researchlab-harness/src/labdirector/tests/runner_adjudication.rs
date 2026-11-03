@@ -22,6 +22,34 @@ fn adjudication_lane(paths: &AppPaths, cycle: &str, lane_id: &str, role: &str, r
 }
 
 #[test]
+fn withdrawn_lead_does_not_reopen_historical_runner_interpretation() {
+    // MEASURED ON cycle-a-20260919, 2026-11-01: 60 aborted
+    // interpretations kept reopening a lead the director had withdrawn.
+    let temp = TempDir::new().unwrap();
+    let paths = AppPaths {
+        project_root: temp.path().to_path_buf(),
+        runtime_root: temp.path().join(".research-lab"),
+        data_root: temp.path().join("data"),
+        stats_driver_script: PathBuf::from("/dev/null"),
+        literature_driver_script: PathBuf::from("/dev/null"),
+    };
+    adjudication_lane(&paths, "cycle-test", "followup-runner-842", "lab-runner", &json!({
+        "validation_summary": {"overall_status": "passed", "checks_failed": 0}
+    }), 1793400462);
+    let lead = state_root(&paths).join("cycle-test-lab-director-hypothesis.json");
+    write_json(&lead, &json!({"status": "selected", "statement": "the old allocation claim"})).unwrap();
+    let mut actions = Vec::new();
+    push_runner_post_run_gate_actions(&paths, "cycle-test", &mut actions).unwrap();
+    assert_eq!(actions[0]["type"], json!("runner_result_interpretation_followup"));
+    write_json(&lead, &json!({
+        "status": "withdrawn", "requery_decision": "restart", "selected_hypothesis": null
+    })).unwrap();
+    actions.clear();
+    push_runner_post_run_gate_actions(&paths, "cycle-test", &mut actions).unwrap();
+    assert!(actions.is_empty());
+}
+
+#[test]
 fn a_handoff_bound_to_a_superseded_analysis_contract_gets_no_runner() {
     // cycle-a-20260919, 2026-10-16: runners 323-326 were created one
     // per pass for a handoff bound to contract f14409a6... while the lead's was

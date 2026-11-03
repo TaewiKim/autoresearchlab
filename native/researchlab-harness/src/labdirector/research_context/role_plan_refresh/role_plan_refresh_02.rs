@@ -792,6 +792,14 @@ pub(crate) fn push_runner_post_run_gate_actions(
     cycle_id: &str,
     priority_actions: &mut Vec<Value>,
 ) -> Result<()> {
+    // MEASURED ON cycle-a-20260919, 2026-11-01: 60 interpretations
+    // were retired while the director requested withdrawal. Historical runner
+    // evidence must not reopen interpretation of an explicitly withdrawn lead.
+    let lead = read_json(&state_root(paths).join(format!("{cycle_id}-lab-director-hypothesis.json")))
+        .unwrap_or(Value::Null);
+    if lead.get("status").and_then(Value::as_str) == Some("withdrawn") {
+        return Ok(());
+    }
     let Some(runner_context) = latest_completed_lab_runner_context(paths, cycle_id)? else {
         return Ok(());
     };

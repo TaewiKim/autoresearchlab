@@ -28,6 +28,13 @@ function currentAnalysisContract(root, cycleId) {
   if (!policy?.enabled) return null;
   const hypothesis = read(path.join(root, "state", `${cycleId}-lab-director-hypothesis.json`));
   const lead = hypothesis?.selected_hypothesis || hypothesis;
+  // MEASURED ON cycle-a-20260919, 2026-11-02: a director withdrew the
+  // lead and chose no successor, and the projection (e182d8d) recorded exactly
+  // that: status "withdrawn", no selected_hypothesis. This line then threw while
+  // the researcher view was refreshed, run-research aborted, and the container
+  // exited with code 1 -- twice, the second time on restart. A withdrawn lead
+  // has no analysis contract; it is not a corrupted one.
+  if (!lead?.statement && hypothesis?.status === "withdrawn") return null;
   if (!lead?.statement) throw new Error("Enabled analysis-contract policy has no readable canonical hypothesis.");
   let spec = policy.specs?.[lead.primary_family] || null;
   if (spec?.canonical_statement && (spec.canonical_statement !== lead.statement

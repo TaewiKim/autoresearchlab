@@ -440,6 +440,115 @@
     }
 
     #[test]
+    fn director_withdrawal_clears_measured_interpretation_churn_and_allows_next_anchor() {
+        // MEASURED ON cycle-a-20260919, 2026-11-01: lead_selected
+        // still named Director 1759 after 60 aborted interpretations and repeated
+        // restart/null-lead decisions. The scientific withdrawal never projected.
+        let (dir, paths, hypothesis_path) = lead_hold_setup(lead_hold_now_ms() - 144_000_000);
+        let mut incumbent = lead_hold_read(&hypothesis_path);
+        incumbent["status"] = json!("selected");
+        incumbent["projection_source"] = json!("lab_director_lane_result");
+        incumbent["validation_data_status"] = json!("needs_materialization");
+        incumbent["dataset_or_accession"] = json!("balanced_local_gap_five_arm_frozen_1391");
+        lead_hold_write(&hypothesis_path, incumbent.clone());
+        for (kind, value) in [
+            ("field-landscape", json!({"subfields": [{}]})),
+            ("frontier-harvest", json!({"top_k": []})),
+            ("sota-cards", json!({"cards": [{}]})),
+            ("field-beliefs", json!({"beliefs": [{}]})),
+            ("candidate-slate", json!({"candidates": [{}]})),
+            ("expert-panel", json!({"ranking": [{}]})),
+            ("novelty-audit", json!({"audits": [{}]})),
+            ("candidate-feasibility", json!({"assessments": [{}]})),
+            ("owner-candidates", json!({"published_at": "2026-09-20T00:00:00Z", "candidates": [{}]})),
+            ("owner-selection", json!({"candidate_id": "c1"})),
+        ] {
+            lead_hold_write(&paths.runtime_root.join(format!("state/cycle-test-{kind}.json")), value);
+        }
+        for n in 1399..1459 {
+            let lane = paths.runtime_root.join(format!("lanes/cycle-test/followup-analyst-{n}"));
+            lead_hold_write(&lane.join("role-plan.json"), json!({
+                "role": "analyst", "action_type": "runner_result_interpretation_followup"
+            }));
+            lead_hold_write(&lane.join("final-status.json"), json!({
+                "status": "aborted", "failure_category": "director_retired_blocked_lane",
+                "completed_at": crate::core::support::now_iso()
+            }));
+        }
+        let progress = || {
+            let output = std::process::Command::new("node")
+                .arg("-e").arg("const m=require(process.argv[1]); const p=m.deriveProgress({cwd:process.argv[2],cycleId:'cycle-test'}); console.log(JSON.stringify({progress:p,findings:m.stallFindings({progress:p,config:m.supervisorConfig({})})}));")
+                .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../src/orchestrator/cycle_progress.js"))
+                .arg(dir.path()).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+        };
+        let stuck = progress();
+        assert_eq!(stuck["progress"]["current_milestone"], json!("lead_selected"));
+        assert_eq!(stuck["progress"]["waiting_on"], json!(["lead_validation_data_status=needs_materialization"]));
+        assert_eq!(stuck["progress"]["lanes_since_milestone"]["by_action_type"]["runner_result_interpretation_followup"]["total"], json!(60));
+        assert!(stuck["findings"].as_array().unwrap().iter().any(|f| f["signature"] == "lane_churn:lead_selected:runner_result_interpretation_followup"));
+
+        let contract = test_contract("lab-director", PathBuf::from("task.md"));
+        let withdrawal = json!({"extracted_json": {
+            "requery_decision": "restart", "selected_hypothesis": null,
+            "replacement_hypotheses": [], "simulation_orders": null,
+            "resume_lead_decision": {"decision": "decline", "lead_id": "hyp:50f5d3574965dd5e"},
+            "next_actions": []
+        }});
+        let silent = json!({"extracted_json": {"requery_decision": "uphold", "selected_hypothesis": null}});
+        assert!(project_lab_director_payload_to_hypothesis(&paths, &contract, &silent).unwrap().is_none());
+        // Withdrawal cannot evade the existing evidence hold or clear its orders.
+        project_lab_director_payload_to_hypothesis(&paths, &contract, &withdrawal).unwrap();
+        assert_eq!(lead_hold_read(&hypothesis_path)["statement"], incumbent["statement"]);
+        assert!(super::super::lab_director_projection::project_lab_director_simulation_orders(&paths, &contract, &withdrawal).unwrap().is_none());
+        let handoff = paths.runtime_root.join("lanes/cycle-test/followup-analyst-01/handoff-validation-plan.json");
+        lead_hold_write(&handoff, json!({}));
+        lead_hold_runner(&paths, "followup-runner-842", &handoff, json!({
+            "validation_summary": {"overall_status": "passed", "checks_failed": 0},
+            "blueprint_executions": [{"status": "completed", "produced_evidence": true, "metrics": {"gain": 0.03}}]
+        }));
+        lead_hold_tick();
+        lead_hold_gatekeeper(&paths, "followup-gatekeeper-2014");
+        let mut stale_contract = contract.clone();
+        stale_contract.lane_id = "followup-lab-director-1810".to_string();
+        lead_hold_write(&paths.runtime_root.join("lanes/cycle-test/followup-lab-director-1810/execution-context.json"), json!({}));
+        lead_hold_tick();
+        project_lab_director_payload_to_hypothesis(&paths, &contract, &withdrawal).unwrap();
+        super::super::lab_director_projection::project_lab_director_simulation_orders(&paths, &contract, &withdrawal).unwrap();
+        let retired = lead_hold_read(&hypothesis_path);
+        assert_eq!(retired["status"], json!("withdrawn"));
+        assert_eq!(retired["withdrawn_hypothesis"]["statement"], incumbent["statement"]);
+        assert_eq!(progress()["progress"]["current_milestone"], json!("owner_selection"));
+        // An older in-flight director cannot restore the retired lead or
+        // overwrite the new withdrawal epoch, including through simulation orders.
+        assert!(project_lab_director_payload_to_hypothesis(&paths, &stale_contract, &lead_hold_replacement("the old allocation claim")).unwrap().is_none());
+        assert!(project_lab_director_payload_to_hypothesis(&paths, &stale_contract, &withdrawal).unwrap().is_none());
+        assert!(super::super::lab_director_projection::project_lab_director_simulation_orders(&paths, &stale_contract, &withdrawal).unwrap().is_none());
+        assert_eq!(lead_hold_read(&hypothesis_path), retired);
+
+        // A future director can select a successor through the ordinary gates;
+        // neither the old hold nor its materialization wait survives withdrawal.
+        lead_hold_write(&paths.runtime_root.join("state/cycle-test-expert-selection.json"), json!({
+            "engaged_at": "2026-09-19T12:00:00Z", "owner_selection": {"candidate_id": "c1", "released": false}
+        }));
+        lead_hold_write(&paths.runtime_root.join("state/cycle-test-owner-candidates.json"), json!({
+            "published_at": "2026-09-20T00:00:00Z", "candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]
+        }));
+        let successor = cite_test_landscape(&json!({"extracted_json": {
+            "requery_decision": "replace",
+            "selected_hypothesis": {"statement": "a successor method", "primary_family": "family_b", "slate_candidate_id": "c2"},
+            "simulation_orders": [{"request_id": "successor-anchor", "conditions": []}]
+        }}));
+        let mut unvetted = successor.clone();
+        unvetted["extracted_json"]["selected_hypothesis"]["slate_candidate_id"] = json!("unvetted");
+        assert!(project_with_valid_landscape(&paths, &contract, &unvetted).unwrap().is_none());
+        project_with_valid_landscape(&paths, &contract, &successor).unwrap();
+        super::super::lab_director_projection::project_lab_director_simulation_orders(&paths, &contract, &successor).unwrap();
+        assert_eq!(progress()["progress"]["current_milestone"], json!("reproduction_anchor"));
+    }
+
+    #[test]
     fn a_lead_is_not_replaced_before_its_own_evidence_is_gated() {
         // cycle-g-v91: four replacements in 3.5 hours, each gate review rejecting
         // a lead "no supplied validation executes".

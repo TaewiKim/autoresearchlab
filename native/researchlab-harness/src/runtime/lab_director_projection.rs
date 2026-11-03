@@ -651,6 +651,13 @@ fn select_lab_director_hypothesis(decision: &Value) -> Option<&Value> {
         })
 }
 
+fn withdraws_lab_director_hypothesis(decision: &Value) -> bool {
+    decision.get("requery_decision").or_else(|| decision.get("decision"))
+        .and_then(Value::as_str) == Some("restart")
+        && decision.get("selected_hypothesis").is_some_and(Value::is_null)
+        && select_lab_director_hypothesis(decision).is_none()
+}
+
 /// The family a lead belongs to is the LabDirector's judgment, declared on the
 /// lead. This reads that declaration; it does not guess one from the prose.
 ///
@@ -708,6 +715,17 @@ pub(crate) fn project_lab_director_simulation_orders(
     let Some(decision) = lab_director_structured_payload(payload) else {
         return Ok(None);
     };
+    if withdraws_lab_director_hypothesis(decision) {
+        let accepted = read_json(&state_root(paths).join(format!(
+            "{}-lab-director-hypothesis.json", contract.cycle_id
+        ))).ok().is_some_and(|lead| {
+            lead.get("generated_by").and_then(Value::as_str) == Some(contract.lane_id.as_str())
+                && withdraws_lab_director_hypothesis(&lead)
+        });
+        if !accepted {
+            return Ok(None);
+        }
+    }
     if let Some(proposed_lead) = select_lab_director_hypothesis(decision) {
         let proposed_statement = hypothesis_statement(proposed_lead);
         let selected = read_json(
@@ -853,14 +871,21 @@ pub(crate) fn project_lab_director_payload_to_hypothesis(
         return Ok(None);
     };
     note_uphold_without_rebuttal(paths, contract, decision);
-    let Some(lead) = select_lab_director_hypothesis(decision) else {
+    // MEASURED ON cycle-a-20260919, 2026-11-01: Directors 1760-1814
+    // restarted with no selected lead, but this early return kept Director
+    // 1759's withdrawn allocation claim active through 60 aborted interpretations.
+    // Withdrawal is a director decision too, subject to the same stale/hold checks.
+    let withdrawing = withdraws_lab_director_hypothesis(decision);
+    let lead = select_lab_director_hypothesis(decision).unwrap_or(&Value::Null);
+    if lead.is_null() && !withdrawing {
         refuse_lead_written_during_lane(paths, contract)?;
         return Ok(None);
-    };
-    let Some(statement) = hypothesis_statement(lead) else {
+    }
+    let statement = hypothesis_statement(lead).unwrap_or_default();
+    if statement.is_empty() && !withdrawing {
         refuse_lead_written_during_lane(paths, contract)?;
         return Ok(None);
-    };
+    }
 
     let hypothesis_path = state_root(paths).join(format!(
         "{}-lab-director-hypothesis.json",
@@ -881,7 +906,7 @@ pub(crate) fn project_lab_director_payload_to_hypothesis(
     let held_lead = read_json(&hold_record_path)
         .ok()
         .and_then(|record| record.get("lead").cloned())
-        .filter(|lead| hypothesis_statement(lead).is_some());
+        .filter(|lead| hypothesis_statement(lead).is_some() || withdraws_lab_director_hypothesis(lead));
     let existing_is_held = held_lead.is_some();
     let existing = held_lead
         .unwrap_or_else(|| {
@@ -999,13 +1024,18 @@ pub(crate) fn project_lab_director_payload_to_hypothesis(
         || existing.get("projection_source").and_then(Value::as_str)
             == Some("lab_director_lane_result");
     let selecting = existing_statement.trim().is_empty() || identity_changed || !existing_written_here;
-    if selecting
+    if selecting && !withdrawing
         && (crate::labdirector::field_landscape_gate_enabled()
             || crate::labdirector::expert_selection_engaged(paths, &contract.cycle_id))
     {
         // The first lead of the harness's making must be the owner's pick; a
         // later replacement may be any owner-vetted candidate.
-        let first_selection = existing_statement.trim().is_empty() || !existing_written_here;
+        let previously_selected = existing.get("withdrawn_hypothesis").is_some_and(|previous| {
+            previous.get("projection_source").and_then(Value::as_str) == Some("lab_director_lane_result")
+                && hypothesis_statement(previous).is_some()
+        });
+        let first_selection = (existing_statement.trim().is_empty() && !previously_selected)
+            || !existing_written_here;
         let reasons = lead_selection_gate_reasons(paths, &contract.cycle_id, lead, first_selection);
         if !reasons.is_empty() {
             let requery_decision = decision
@@ -1103,6 +1133,24 @@ pub(crate) fn project_lab_director_payload_to_hypothesis(
                 return Ok(Some(hypothesis_path));
             }
         }
+    }
+    if withdrawing {
+        let projected = json!({
+            "status": "withdrawn",
+            "requery_decision": "restart",
+            "selected_hypothesis": null,
+            "replacement_hypotheses": [],
+            "withdrawn_hypothesis": existing.get("withdrawn_hypothesis").unwrap_or(&existing),
+            "lab_director_decision": decision,
+            "updated_at": now_iso(),
+            "generated_by": contract.lane_id,
+            "projection_source": "lab_director_lane_result",
+            "selected_at_epoch_ms": now_ms,
+            "lead_hold_released_by": hold_released_by,
+        });
+        write_json(&hypothesis_path, &projected)?;
+        write_lead_hold_record(paths, contract, &projected)?;
+        return Ok(Some(hypothesis_path));
     }
     // When the lead itself changes, its hold starts now; an uphold keeps the date
     // the lead was chosen, not the date it was last confirmed.
