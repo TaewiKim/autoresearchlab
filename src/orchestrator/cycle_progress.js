@@ -703,6 +703,75 @@ const MILESTONES = [
 
 const MILESTONE_IDS = MILESTONES.map((item) => item.id);
 
+// MEASURED ON cycle-a-20260919, 2026-11-06: after an accepted
+// withdrawal the harness released, completed and reviewed the document lanes.
+// The observer still required a selected scientific lead, attributed 253 old
+// comparator lanes to owner_selection, and said the withdrawal file was absent.
+// Observe the authorised document path from the same durable release receipts
+// the executor writes. Publication is progress; it does not assert a gate pass.
+function documentMilestones(ctx) {
+  if (selectedLeadMs(ctx)) return null;
+  const authorization = ctx.read("document-authorization");
+  const ownerAuthorized = authorization.value?.authorized === true
+    && Boolean(String(authorization.value?.reason || "").trim());
+  const releases = ctx.read("dependency-gate-overrides").value?.releases;
+  const releasedLanes = new Map();
+  const requiredRoles = new Set(ownerAuthorized ? ["author", "illustrator"] : []);
+  for (const release of Array.isArray(releases) ? releases : []) {
+    if (release?.blocker !== "waiting-for-hypothesis-gate gate_passed=false"
+        || release.released_by !== "lab-director"
+        || !String(release.rationale || "").trim()
+        || !parseMs(release.recorded_at)) continue;
+    const laneId = String(release.lane_id || "");
+    if (!laneId || path.basename(laneId) !== laneId || /[\\/]/.test(laneId)) continue;
+    const laneDir = path.join(ctx.lanesDir, laneId);
+    const plan = readJsonOrNull(path.join(laneDir, "role-plan.json"));
+    const contract = readJsonOrNull(path.join(laneDir, "lane-contract.json"));
+    const role = plan?.role || contract?.role;
+    if (!["author", "illustrator"].includes(role)) continue;
+    requiredRoles.add(role);
+    // Releasing a retry does not restart the clock on the original assignment.
+    releasedLanes.set(laneId, Math.min(releasedLanes.get(laneId) || Infinity, parseMs(release.recorded_at)));
+  }
+  if (!ownerAuthorized && !releasedLanes.size) return null;
+  const decisionMs = artifactMs(ctx.read("lab-director-hypothesis"), ["selected_at_epoch_ms", "updated_at"]);
+  const authorizedMs = Math.max(decisionMs, ownerAuthorized
+    ? artifactMs(authorization, ["authorized_at", "updated_at"])
+    : Math.min(...releasedLanes.values()));
+  let laneIds = [...releasedLanes.keys()];
+  if (ownerAuthorized) {
+    try { laneIds = fs.readdirSync(ctx.lanesDir); } catch { laneIds = []; }
+  }
+  const outputs = new Map();
+  for (const laneId of laneIds) {
+    const laneDir = path.join(ctx.lanesDir, laneId);
+    const plan = readJsonOrNull(path.join(laneDir, "role-plan.json"));
+    const contract = readJsonOrNull(path.join(laneDir, "lane-contract.json"));
+    const role = plan?.role || contract?.role;
+    if (!["author", "illustrator"].includes(role)) continue;
+    const status = readJsonOrNull(path.join(laneDir, "final-status.json"));
+    const completedMs = parseMs(status?.completed_at);
+    if (status?.status !== "completed" || completedMs < authorizedMs
+        || !isFile(path.join(laneDir, "result.json"))) continue;
+    outputs.set(role, Math.max(outputs.get(role) || 0, completedMs));
+  }
+  const outputsReady = [...requiredRoles].every((role) => outputs.has(role));
+  const outputMs = Math.max(0, ...outputs.values());
+  const reviews = ["report", "paper"].map((kind) => ctx.read(`${kind}-review`).value);
+  const reviewsReady = outputsReady && reviews.every((review, index) => (
+    typeof review?.[`${["report", "paper"][index]}_gate_passed`] === "boolean"
+      && parseMs(review.ts) >= outputMs
+  ));
+  return [
+    { id: "document_authorized", artifact: "dependency-gate-overrides", reached: () => true, at: () => authorizedMs },
+    { id: "document_outputs", artifact: "lanes/<cycle>/*/result.json", reached: () => outputsReady,
+      at: () => outputMs, waiting: () => [`document_outputs_pending: ${[...requiredRoles].join(" and ")} must complete after authorization`] },
+    { id: "document_review", artifact: "report-review and paper-review", reached: () => reviewsReady,
+      at: () => Math.max(...reviews.map((review) => parseMs(review?.ts))),
+      waiting: () => ["document_reviews_pending: report and paper reviews must cover the completed document outputs"] },
+  ];
+}
+
 // The one wait in the pipeline that is a person, not a defect. A cycle sitting
 // here is correct, and raising a stall against it would teach the maintainer to
 // "fix" the owner checkpoint away -- the same mistake as deleting a check.
@@ -918,8 +987,11 @@ function runningLanes(ctx) {
     if (ended) continue;
     const runState = readJsonOrNull(path.join(laneDir, "run-state.json"));
     if (String(runState?.status || "") !== "running") continue;
+    const plan = readJsonOrNull(path.join(laneDir, "role-plan.json"));
+    const contract = readJsonOrNull(path.join(laneDir, "lane-contract.json"));
     running.push({
       lane_id: laneId,
+      role: plan?.role || contract?.role || null,
       action_type: laneActionType(laneDir, laneId),
       started_at: runState.started_at || null,
     });
@@ -1013,12 +1085,13 @@ function milestoneAt(entry, ctx) {
  */
 function deriveProgress({ cwd, cycleId, now = Date.now(), pinnedReachedAtMs = 0 }) {
   const ctx = openCycleState({ cwd, cycleId });
+  const milestones = documentMilestones(ctx) || MILESTONES;
 
   let reachedIndex = -1;
-  for (let index = 0; index < MILESTONES.length; index += 1) {
+  for (let index = 0; index < milestones.length; index += 1) {
     let ok = false;
     try {
-      ok = MILESTONES[index].reached(ctx) === true;
+      ok = milestones[index].reached(ctx) === true;
     } catch {
       ok = false;
     }
@@ -1026,8 +1099,8 @@ function deriveProgress({ cwd, cycleId, now = Date.now(), pinnedReachedAtMs = 0 
     reachedIndex = index;
   }
 
-  const current = reachedIndex >= 0 ? MILESTONES[reachedIndex] : null;
-  const next = MILESTONES[reachedIndex + 1] || null;
+  const current = reachedIndex >= 0 ? milestones[reachedIndex] : null;
+  const next = milestones[reachedIndex + 1] || null;
   // The CURRENT milestone's own moment, not the newest of all of them. Several
   // earlier stages are projections the harness republishes on every scheduling
   // pass (frontier-harvest's review state is refreshed once a pass), and taking
@@ -1089,7 +1162,7 @@ function deriveProgress({ cwd, cycleId, now = Date.now(), pinnedReachedAtMs = 0 
   return {
     cycle_id: cycleId,
     generated_at: new Date(now).toISOString(),
-    milestone_order: MILESTONE_IDS,
+    milestone_order: milestones.map((item) => item.id),
     current_milestone: current ? current.id : null,
     current_milestone_index: reachedIndex,
     reached_at: isoOf(currentMs),
@@ -1204,7 +1277,8 @@ function stallFindings({ progress, config, now = Date.now() }) {
   if (WAITING_ON_OWNER.has(progress.next_milestone)) return findings;
   // A lane that can move the NEXT milestone is running: the cycle is working.
   const advancing = new Set(ADVANCING_ACTIONS[progress.next_milestone] || []);
-  const working = (progress.running_lanes || []).some((lane) => advancing.has(lane.action_type));
+  const working = (progress.running_lanes || []).some((lane) => advancing.has(lane.action_type)
+    || (progress.next_milestone === "document_outputs" && ["author", "illustrator"].includes(lane.role)));
   if (working) return findings;
 
   const reachedMs = parseMs(progress.reached_at);

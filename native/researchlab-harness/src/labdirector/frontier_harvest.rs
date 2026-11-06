@@ -972,13 +972,41 @@ fn queue_review_lane_is_live(paths: &AppPaths, cycle_id: &str, output_dir: &Path
 }
 
 /// The directory the harvest published its queue into.
-fn harvest_queue_dir(published: &Value) -> Option<PathBuf> {
-    if let Some(dir) = text_of(published.get("lane_output_dir")) {
-        return Some(PathBuf::from(dir));
+fn harvest_queue_dir(paths: &AppPaths, cycle_id: &str, published: &Value) -> Option<PathBuf> {
+    let recorded = text_of(published.get("lane_output_dir")).map(PathBuf::from).or_else(|| {
+        text_of(published.get("source_path"))
+            .map(PathBuf::from)
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+    })?;
+    Some(relocated_harvest_dir(paths, cycle_id, recorded))
+}
+
+/// The harvest state records the directory by the path it had when the harvest ran.
+/// A cycle moved into a container carries a path that no longer exists there
+/// (a Windows drive path read on Linux), so the queue looked absent, no reviewer was
+/// ever dispatched, and the pending candidates held lead selection forever. A
+/// recorded path that is not there is re-rooted under this workspace's runtime root
+/// by whatever follows its `.research-lab` segment, and failing that by its last
+/// segment under the cycle's artifact directory.
+fn relocated_harvest_dir(paths: &AppPaths, cycle_id: &str, recorded: PathBuf) -> PathBuf {
+    if recorded.exists() {
+        return recorded;
     }
-    text_of(published.get("source_path"))
-        .map(PathBuf::from)
-        .and_then(|path| path.parent().map(Path::to_path_buf))
+    let text = recorded.to_string_lossy().replace('\\', "/");
+    let segments: Vec<&str> = text.split('/').filter(|segment| !segment.is_empty()).collect();
+    if let Some(at) = segments.iter().rposition(|segment| *segment == ".research-lab") {
+        let rebased = segments[at + 1..].iter().fold(paths.runtime_root.clone(), |acc, part| acc.join(part));
+        if rebased.exists() {
+            return rebased;
+        }
+    }
+    if let Some(last) = segments.last() {
+        let by_name = stats_artifacts_root(paths).join(cycle_id).join(last);
+        if by_name.exists() {
+            return by_name;
+        }
+    }
+    recorded
 }
 
 fn frontier_review_description(
@@ -1034,7 +1062,7 @@ pub(crate) fn dispatch_frontier_review(paths: &AppPaths, cycle_id: &str) -> Resu
     if status.state != "pending_review" {
         return Ok(Vec::new());
     }
-    let Some(output_dir) = harvest_queue_dir(&status.published) else {
+    let Some(output_dir) = harvest_queue_dir(paths, cycle_id, &status.published) else {
         return Ok(Vec::new());
     };
     let queue_path = output_dir.join(FRONTIER_REVIEW_QUEUE_FILE);
@@ -1501,6 +1529,37 @@ mod tests {
         }
         // One at a time: a second pass while that lane is live adds nothing.
         assert!(dispatch_frontier_review(&paths, cycle).unwrap().is_empty());
+    }
+
+    /// The measured stall: the harvest state recorded its output directory as a
+    /// Windows path, the cycle then ran in a Linux container where that path does not
+    /// exist, the queue looked absent, and the twelve pending candidates held lead
+    /// selection for days with no reviewer ever dispatched.
+    #[test]
+    fn a_harvest_recorded_under_a_foreign_path_still_gets_its_reviewer() {
+        let temp = TempDir::new().unwrap();
+        let paths = test_paths(temp.path());
+        let cycle = "frontier-review-relocated";
+        let output = published_harvest_with_queue(&paths, cycle);
+        end_lane_by_self_heal(&lane_root(&paths, cycle, "followup-scout-02"));
+        let state_path = frontier_harvest_state_path(&paths, cycle);
+        let mut state = read_json(&state_path).unwrap();
+        let lane_name = output.file_name().unwrap().to_string_lossy().to_string();
+        let tail = output.strip_prefix(&paths.runtime_root).unwrap().to_string_lossy().replace('/', "\\");
+        state["lane_output_dir"] = json!(format!("D:\\projects\\elsewhere\\.research-lab\\{tail}"));
+        state["source_path"] = json!(format!("D:\\projects\\elsewhere\\.research-lab\\{tail}\\frontier-candidates.json"));
+        write_json(&state_path, &state).unwrap();
+        assert!(lane_name.starts_with("followup-scout"), "{lane_name}");
+
+        let created = dispatch_frontier_review(&paths, cycle).unwrap();
+        assert_eq!(created.len(), 1, "a foreign recorded path must not hide the queue: {created:?}");
+        let role_plan = read_json(&lane_root(&paths, cycle, created[0]["lane_id"].as_str().unwrap()).join("role-plan.json")).unwrap();
+        assert_eq!(role_plan["planner_metadata"]["frontier_review_contract"]["lane_output_dir"], json!(output));
+        // A path that exists is never rewritten.
+        assert_eq!(relocated_harvest_dir(&paths, cycle, output.clone()), output);
+        // And one that resolves nowhere is returned as recorded.
+        let nowhere = PathBuf::from("D:\\nowhere\\at\\all");
+        assert_eq!(relocated_harvest_dir(&paths, cycle, nowhere.clone()), nowhere);
     }
 
     /// A reviewer the GENERIC literature recovery already bound to the same queue
