@@ -523,6 +523,46 @@ function preserveExistingResearchNotes({ jsonPath, markdownPath, reason = "prese
   };
 }
 
+function publishAcceptedDirectorNotes({ root, cycleId, jsonPath, markdownPath }) {
+  // MEASURED ON cycle-a-20260919, 2026-11-06: Director 1866 obeyed
+  // STATE BELONGS TO THE HARNESS and wrote its withdrawal notebook in its lane.
+  // Refresh preserved the October 30 notebook instead, telling every successor
+  // to resume the withdrawn lead. Publish the author's notebook, never regenerate
+  // its reasoning, and only from the decision the lead projection accepted.
+  const hypothesis = readJsonIfExists(path.join(root, "state", `${cycleId}-lab-director-hypothesis.json`));
+  const laneId = hypothesis?.generated_by;
+  if (hypothesis?.projection_source !== "lab_director_lane_result" ||
+      !/^lab-director-\d+$|^followup-lab-director-\d+(?:-recovery-\d+)*$/.test(laneId || "")) return null;
+  const lane = path.join(root, "lanes", cycleId, laneId);
+  const final = readJsonIfExists(path.join(lane, "final-status.json"));
+  const result = readJsonIfExists(path.join(lane, "result.json"));
+  if (final?.status !== "completed" || final.degraded || result?.degraded ||
+      result?.superseded_by_user_instruction || final.superseded_by_user_instruction) return null;
+  const sourcePath = path.join(lane, "lab-director-research-notes.json");
+  const notes = readJsonIfExists(sourcePath);
+  if (!notes || notes.cycle_id !== cycleId ||
+      !Object.hasOwn(notes, "current_lead_hypothesis") ||
+      !Array.isArray(notes.decision_log) || !notes.handoff_for_next_lab_director ||
+      fileMtimeMs(sourcePath) <= Math.max(fileMtimeMs(jsonPath), fileMtimeMs(markdownPath))) return null;
+  const selected = hypothesis.selected_hypothesis || hypothesis;
+  const statement = typeof selected.statement === "string" ? selected.statement.trim() : "";
+  const notesStatement = notes.current_lead_hypothesis?.statement;
+  if (hypothesis.status === "withdrawn"
+    ? notes.current_lead_hypothesis !== null
+    : !statement || typeof notesStatement !== "string" || notesStatement.trim() !== statement) return null;
+  const outcome = writeAuthoritativeState({
+    root: path.dirname(root), cycleId, kind: "lab-director-research-notes", filePath: jsonPath,
+    value: { ...notes, generated_by: laneId, source_path: sourcePath },
+    actor: laneId, reason: "publish the accepted director's lane-local notebook",
+  });
+  if (!outcome.written) return null;
+  const localMarkdown = path.join(lane, "lab-director-research-notes.md");
+  const markdown = fs.existsSync(localMarkdown) ? fs.readFileSync(localMarkdown, "utf8") : null;
+  if (markdown) fs.writeFileSync(markdownPath, markdown, "utf8");
+  else writeMarkdownNotes(markdownPath, notes);
+  return { json_path: jsonPath, markdown_path: markdownPath, updated: true, reason: "published_lane_notebook" };
+}
+
 function projectNotesLeadToHypothesis({ stateRoot, cycleId, notes }) {
   const lead = notes?.current_lead_hypothesis || null;
   const statement = compactText(lead?.statement || "", 1600);
@@ -640,6 +680,10 @@ function ensureLabDirectorResearchNotes({ root, cycleId, force = false }) {
   ensureDir(stateRoot);
   const jsonPath = path.join(stateRoot, `${cycleId}-lab-director-research-notes.json`);
   const markdownPath = path.join(stateRoot, `${cycleId}-lab-director-research-notes.md`);
+  if (!force) {
+    const published = publishAcceptedDirectorNotes({ root, cycleId, jsonPath, markdownPath });
+    if (published) return published;
+  }
   const existing = readJsonIfExists(jsonPath) || {};
   if (!force && notesFileExists(jsonPath, markdownPath)) {
     // Research notes are LabDirector's durable scientific notebook, not a

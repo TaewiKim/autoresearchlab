@@ -76,6 +76,17 @@ pub(crate) fn current_lead_under_review(paths: &AppPaths, cycle_id: &str) -> Val
             .unwrap_or(Value::Null)
     };
     json!({
+        // MEASURED ON cycle-a-20260919, 2026-11-06: Director 1866
+        // still awaited administrative hold release after the harness accepted
+        // restart. This projection discarded the withdrawal status and exposed
+        // only null claim fields, so successors could not see that it applied.
+        "status": hypothesis.get("status"),
+        "requery_decision": hypothesis.get("requery_decision"),
+        "projection_source": hypothesis.get("projection_source"),
+        "lead_hold_released_by": hypothesis.get("lead_hold_released_by"),
+        "updated_at": hypothesis.get("updated_at"),
+        "latest_replacement_deferred": hypothesis.get("replacement_deferred")
+            .and_then(Value::as_array).and_then(|items| items.last()),
         "statement": pick("statement"),
         "answers_research_problem": pick("answers_research_problem"),
         "primary_family": pick("primary_family"),
@@ -89,7 +100,11 @@ pub(crate) fn current_lead_under_review(paths: &AppPaths, cycle_id: &str) -> Val
         "trend_positioning": pick("trend_positioning"),
         "source_artifact": path.display().to_string(),
         "generated_by": hypothesis.get("generated_by").cloned().unwrap_or(Value::Null),
-        "note": "The lead as its author stated it. Score novelty and technical_quality against THESE terms: an inadequate falsification condition or an unanswered rival mechanism is a finding about the lead, and their absence here means the director did not supply them -- which is itself the finding.",
+        "note": if hypothesis.get("status").and_then(Value::as_str) == Some("withdrawn") {
+            "The harness has applied the director's withdrawal. There is no active lead and no incumbent lead hold to release. Select a successor through the ordinary evidence and owner-selection gates; historical leads and notebook recommendations are not current decisions."
+        } else {
+            "The lead as its author stated it. Score novelty and technical_quality against THESE terms: an inadequate falsification condition or an unanswered rival mechanism is a finding about the lead, and their absence here means the director did not supply them -- which is itself the finding."
+        },
     })
 }
 

@@ -549,6 +549,273 @@
     }
 
     #[test]
+    fn gate_dispositions_reach_successors_and_release_owner_selection_churn() {
+        // MEASURED ON cycle-a-20260919, 2026-11-06: 271 adaptive
+        // searches finished at owner_selection. Independent dispositions had
+        // landed, but downstream reviews reintroduced the settled objections;
+        // Director 1872 waited for controller synchronization instead of choosing.
+        let (dir, paths, hypothesis_path) = lead_hold_setup(lead_hold_now_ms() - 60_000);
+        let retired = json!({"status": "withdrawn", "selected_hypothesis": null,
+            "projection_source": "lab_director_lane_result", "requery_decision": "restart",
+            "selected_at_epoch_ms": lead_hold_now_ms() - 60_000,
+            "withdrawn_hypothesis": {"statement": "the old allocation claim",
+                "projection_source": "lab_director_lane_result"}});
+        lead_hold_write(&hypothesis_path, retired.clone());
+        lead_hold_write(&paths.runtime_root.join("state/cycle-test-lead-hold.json"), json!({"lead": retired}));
+        for (kind, value) in [
+            ("field-landscape", json!({"subfields": [{}]})),
+            ("frontier-harvest", json!({"top_k": []})),
+            ("sota-cards", json!({"cards": [{}]})),
+            ("field-beliefs", json!({"beliefs": [{}]})),
+            ("candidate-slate", json!({"candidates": [{}]})),
+            ("expert-panel", json!({"ranking": [{}]})),
+            ("novelty-audit", json!({"audits": [{}]})),
+            ("candidate-feasibility", json!({"assessments": [{}]})),
+            ("owner-candidates", json!({"published_at": "2026-09-20T00:00:00Z",
+                "candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]})),
+            ("owner-selection", json!({"candidate_id": "c1", "decided_at": "2026-10-01T22:47:03Z"})),
+            ("expert-selection", json!({"engaged_at": "2026-09-19T12:00:00Z",
+                "owner_selection": {"candidate_id": "c1", "released": false}})),
+        ] {
+            lead_hold_write(&paths.runtime_root.join(format!("state/cycle-test-{kind}.json")), value);
+        }
+        for n in 443..714 {
+            let lane = paths.runtime_root.join(format!("lanes/cycle-test/followup-scout-{n}"));
+            lead_hold_write(&lane.join("role-plan.json"), json!({"role": "scout", "action_type": "adaptive_search_followup"}));
+            lead_hold_write(&lane.join("final-status.json"), json!({"status": "completed", "completed_at": crate::core::support::now_iso()}));
+        }
+        let old = "Novelty: need a broader set of non-trivial hypotheses";
+        let active = "The registered controlled effects are nonidentified";
+        let gate = json!({"gatekeeper_review_status": "parsed", "score": 20, "gate_passed": false,
+            "rubric": [{"name": "novelty", "score": 20}], "blockers": [active],
+            "gate_blocker_adjudication_resolution": {"active_blockers": [active],
+                "removed_blockers": [{"blocker": old, "adjudication": {"decision": "superseded"}}],
+                "downgraded_blockers": []}});
+        let gate_path = paths.runtime_root.join("state/cycle-test-gate-review.json");
+        lead_hold_write(&gate_path, gate.clone());
+        let snapshot = || {
+            let output = std::process::Command::new("node").arg("-e").arg(r#"
+                const base = process.argv[1], cwd = process.argv[2], cycleId = 'cycle-test';
+                const {buildConclusionReview} = require(base + '/src/reporting/conclusion_review');
+                const {buildApprovalReview} = require(base + '/src/reporting/approval_review');
+                const m = require(base + '/src/orchestrator/cycle_progress');
+                const summary = {objective: 'Robot imitation coverage', evidence_readiness: {ready:true},
+                  conclusion_readiness_score: 50, approval_readiness_score: 50,
+                  conclusion_rubric: [{name:'novelty',score:50,reasons:[
+                    'Novelty: need a broader set of non-trivial hypotheses',
+                    'The registered controlled effects are nonidentified']}]};
+                summary.approval_rubric = summary.conclusion_rubric;
+                const conclusion = buildConclusionReview({cwd,cycleId,researcherView:{summary}}).review;
+                const approval = buildApprovalReview({cwd,cycleId,researcherView:{summary},conclusionReview:conclusion,staged:true}).review;
+                const progress = m.deriveProgress({cwd,cycleId});
+                console.log(JSON.stringify({conclusion,approval,progress,
+                  findings:m.stallFindings({progress,config:m.supervisorConfig({})})}));
+            "#).arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+                .arg(dir.path()).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+        };
+        let stuck = snapshot();
+        assert_eq!(stuck["progress"]["current_milestone"], json!("owner_selection"));
+        assert_eq!(stuck["progress"]["lanes_since_milestone"]["by_action_type"]["adaptive_search_followup"]["total"], json!(271));
+        assert!(stuck["findings"].as_array().unwrap().iter().any(|f|
+            f["signature"] == "lane_churn:owner_selection:adaptive_search_followup"));
+        assert!(!stuck["conclusion"]["conclusion_blockers"].as_array().unwrap().contains(&json!(old)));
+        assert!(!stuck["approval"]["approval_blockers"].to_string().contains(old));
+        assert!(stuck["approval"]["approval_blockers"].to_string().contains(active));
+        assert_eq!(stuck["conclusion"]["conclusion_rubric"][0]["score"], json!(20));
+        assert_eq!(stuck["approval"]["approval_gate_passed"], json!(false));
+        assert_eq!(lead_hold_read(&gate_path), gate);
+        // The settled administrative prerequisite is now visible in both sinks.
+        // Only a Director-authored, ordinarily vetted successor advances the cycle;
+        // synchronization itself cannot select a lead or turn a gate into a pass.
+        let contract = test_contract("lab-director", PathBuf::from("task.md"));
+        let successor = cite_test_landscape(&json!({"extracted_json": {
+            "requery_decision": "replace", "selected_hypothesis": {
+                "statement": "a successor method", "primary_family": "family_b", "slate_candidate_id": "c2"}
+        }}));
+        assert!(project_with_valid_landscape(&paths, &contract, &successor).unwrap().is_some());
+        let advanced = snapshot();
+        assert_eq!(advanced["progress"]["current_milestone"], json!("lead_selected"));
+        assert!(!advanced["findings"].as_array().unwrap().iter().any(|f|
+            f["signature"] == "lane_churn:owner_selection:adaptive_search_followup"));
+        assert_eq!(lead_hold_read(&gate_path), gate);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relocated_execution_advances_measured_blocking_recovery_churn() {
+        // MEASURED ON cycle-a-20260919, 2026-11-06: 262 recovery
+        // planners completed at owner_selection. Released base lanes then used
+        // a nonexistent Windows cwd. A reset must repair the execution contract,
+        // not replay ENOENT; a real Director selection must still pass projection.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths {
+            project_root: dir.path().to_path_buf(),
+            runtime_root: dir.path().join(".research-lab"),
+            data_root: dir.path().join("data"),
+            stats_driver_script: PathBuf::from("unused"),
+            literature_driver_script: PathBuf::from("unused"),
+        };
+        let hypothesis = paths.runtime_root.join("state/cycle-test-lab-director-hypothesis.json");
+        let retired = json!({"status": "withdrawn", "selected_hypothesis": null,
+            "projection_source": "lab_director_lane_result", "requery_decision": "restart",
+            "withdrawn_hypothesis": {"statement": "the prior lead", "projection_source": "lab_director_lane_result"}});
+        lead_hold_write(&hypothesis, retired.clone());
+        for (kind, value) in [
+            ("field-landscape", json!({"subfields": [{}]})),
+            ("frontier-harvest", json!({"top_k": []})),
+            ("sota-cards", json!({"cards": [{}]})),
+            ("field-beliefs", json!({"beliefs": [{}]})),
+            ("candidate-slate", json!({"candidates": [{}]})),
+            ("expert-panel", json!({"ranking": [{}]})),
+            ("novelty-audit", json!({"audits": [{}]})),
+            ("candidate-feasibility", json!({"assessments": [{}]})),
+            ("owner-candidates", json!({"published_at": "2026-09-20T00:00:00Z",
+                "candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]})),
+            ("owner-selection", json!({"candidate_id": "c1", "decided_at": "2026-10-01T22:47:03Z"})),
+            ("expert-selection", json!({"engaged_at": "2026-09-19T12:00:00Z",
+                "owner_selection": {"candidate_id": "c1", "released": false}})),
+        ] {
+            lead_hold_write(&paths.runtime_root.join(format!("state/cycle-test-{kind}.json")), value);
+        }
+        for n in 0..262 {
+            let lane = paths.runtime_root.join(format!("lanes/cycle-test/followup-lab-director-{n}"));
+            lead_hold_write(&lane.join("role-plan.json"), json!({"role": "lab-director",
+                "action_type": "blocking_lane_recovery_planning"}));
+            lead_hold_write(&lane.join("final-status.json"), json!({"status": "completed",
+                "completed_at": crate::core::support::now_iso()}));
+        }
+        let snapshot = || {
+            let output = std::process::Command::new("node").arg("-e").arg(r#"
+                const m=require(process.argv[1]+'/src/orchestrator/cycle_progress');
+                const progress=m.deriveProgress({cwd:process.argv[2],cycleId:'cycle-test'});
+                console.log(JSON.stringify({progress, findings:m.stallFindings({progress,config:m.supervisorConfig({})})}));
+            "#).arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).arg(dir.path()).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+        };
+        let stuck = snapshot();
+        assert_eq!(stuck["progress"]["current_milestone"], "owner_selection");
+        assert_eq!(stuck["progress"]["lanes_since_milestone"]["by_action_type"]["blocking_lane_recovery_planning"]["total"], 262);
+        assert!(stuck["findings"].as_array().unwrap().iter().any(|f|
+            f["signature"] == "lane_churn:owner_selection:blocking_lane_recovery_planning"));
+
+        let lane = paths.runtime_root.join("lanes/cycle-test/lab-director-01");
+        let old_root = r"Z:\retired-host\researchlab";
+        let old_lane = format!(r"{old_root}\.research-lab\lanes\cycle-test\lab-director-01");
+        lead_hold_write(&lane.join("lane-contract.json"), json!({
+            "cycle_id": "cycle-test", "lane_id": "lab-director-01", "role": "lab-director",
+            "runtime_class": "codex-agent", "mode": "read-write-scoped", "cwd": old_root,
+            "task_file": format!(r"{old_lane}\task.md"), "allowed_outputs": [old_lane],
+            "output_artifact": format!(r"{old_lane}\result.json"), "fallback_strategy": null
+        }));
+        lead_hold_write(&lane.join("final-status.json"), json!({"status": "failed",
+            "error": "failed to spawn agent runtime (codex)"}));
+        let successor = cite_test_landscape(&json!({"extracted_json": {
+            "requery_decision": "replace", "selected_hypothesis": {"statement": "a vetted successor",
+                "primary_family": "family_b", "slate_candidate_id": "c2"}}}));
+        // Local executor, no model/network. Its saved decision is still subject
+        // to the real landscape, owner-slate and lead-protection gates below.
+        std::fs::write(lane.join("task.md"), format!("process.stdout.write(JSON.stringify({successor}));")).unwrap();
+        assert_eq!(std::process::Command::new("node").current_dir(old_root).output().unwrap_err().kind(),
+            std::io::ErrorKind::NotFound);
+        let healed = std::process::Command::new("node").arg("-e").arg(r#"
+            const {healCycleOnce}=require(process.argv[1]+'/src/orchestrator/self_healing_cycle');
+            healCycleOnce({cwd:process.argv[2],cycleId:'cycle-test'});
+        "#).arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).arg(dir.path()).output().unwrap();
+        assert!(healed.status.success(), "{}", String::from_utf8_lossy(&healed.stderr));
+        assert!(!lane.join("final-status.json").exists());
+        let contract: LaneContract = serde_json::from_value(lead_hold_read(&lane.join("lane-contract.json"))).unwrap();
+        let executed = std::process::Command::new("node").arg(&contract.task_file)
+            .current_dir(&contract.cwd).output().unwrap();
+        assert!(executed.status.success(), "{}", String::from_utf8_lossy(&executed.stderr));
+        assert_eq!(lead_hold_read(&hypothesis), retired, "relocation cannot promote a lead");
+        let payload = serde_json::from_slice(&executed.stdout).unwrap();
+        assert!(project_with_valid_landscape(&paths, &contract, &payload).unwrap().is_some());
+        let advanced = snapshot();
+        assert_eq!(advanced["progress"]["current_milestone"], "lead_selected");
+        assert!(!advanced["findings"].as_array().unwrap().iter().any(|f|
+            f["signature"] == "lane_churn:owner_selection:blocking_lane_recovery_planning"));
+    }
+
+    #[test]
+    fn accepted_restart_receipt_breaks_measured_owner_selection_requery_churn() {
+        // MEASURED ON cycle-a-20260919, 2026-11-06: 745 requery lanes
+        // finished at owner_selection. The lead was withdrawn, but successor
+        // plans omitted that status and still awaited administrative release.
+        let (dir, paths, hypothesis_path) = lead_hold_setup(lead_hold_now_ms() - 60_000);
+        let retired = json!({
+            "status": "withdrawn", "selected_hypothesis": null,
+            "requery_decision": "restart", "projection_source": "lab_director_lane_result",
+            "generated_by": "followup-lab-director-1866",
+            "selected_at_epoch_ms": lead_hold_now_ms() - 60_000,
+            "withdrawn_hypothesis": {"statement": "the old allocation claim", "projection_source": "lab_director_lane_result"},
+            "lead_hold_released_by": null
+        });
+        lead_hold_write(&hypothesis_path, retired.clone());
+        lead_hold_write(&paths.runtime_root.join("state/cycle-test-lead-hold.json"), json!({"lead": retired}));
+        for (kind, value) in [
+            ("field-landscape", json!({"subfields": [{}]})),
+            ("frontier-harvest", json!({"top_k": []})),
+            ("sota-cards", json!({"cards": [{}]})),
+            ("field-beliefs", json!({"beliefs": [{}]})),
+            ("candidate-slate", json!({"candidates": [{}]})),
+            ("expert-panel", json!({"ranking": [{}]})),
+            ("novelty-audit", json!({"audits": [{}]})),
+            ("candidate-feasibility", json!({"assessments": [{}]})),
+            ("owner-candidates", json!({"published_at": "2026-10-01T22:47:00Z", "candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]})),
+            ("owner-selection", json!({"candidate_id": "c1", "decided_at": "2026-10-01T22:47:03Z"})),
+            ("expert-selection", json!({"engaged_at": "2026-09-19T12:00:00Z", "owner_selection": {"candidate_id": "c1", "released": false}})),
+        ] {
+            lead_hold_write(&paths.runtime_root.join(format!("state/cycle-test-{kind}.json")), value);
+        }
+        for n in 1122..1867 {
+            let lane = paths.runtime_root.join(format!("lanes/cycle-test/followup-lab-director-{n}"));
+            lead_hold_write(&lane.join("role-plan.json"), json!({
+                "role": "lab-director", "action_type": "lab_director_requery_followup"
+            }));
+            lead_hold_write(&lane.join("final-status.json"), json!({
+                "status": "completed", "completed_at": crate::core::support::now_iso()
+            }));
+        }
+        let progress = || {
+            let output = std::process::Command::new("node")
+                .arg("-e").arg("const m=require(process.argv[1]); const p=m.deriveProgress({cwd:process.argv[2],cycleId:'cycle-test'}); console.log(JSON.stringify({progress:p,findings:m.stallFindings({progress:p,config:m.supervisorConfig({})})}));")
+                .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../src/orchestrator/cycle_progress.js"))
+                .arg(dir.path()).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+        };
+        let stuck = progress();
+        assert_eq!(stuck["progress"]["current_milestone"], "owner_selection");
+        assert_eq!(stuck["progress"]["waiting_on"], json!(["lead_selected_not_published: lab-director-hypothesis has not been written"]));
+        assert_eq!(stuck["progress"]["lanes_since_milestone"]["by_action_type"]["lab_director_requery_followup"]["total"], 745);
+        assert!(stuck["findings"].as_array().unwrap().iter().any(|f| f["signature"] == "lane_churn:owner_selection:lab_director_requery_followup"));
+
+        let receipt = crate::labdirector::current_lead_under_review(&paths, "cycle-test");
+        assert_eq!(receipt["status"], "withdrawn");
+        assert_eq!(receipt["requery_decision"], "restart");
+        assert_eq!(receipt["projection_source"], "lab_director_lane_result");
+        assert!(receipt["statement"].is_null());
+        // The nullable release reason on a repeated withdrawal is not a live
+        // hold. The accepted status tells the next director it already applied.
+        assert!(receipt["lead_hold_released_by"].is_null());
+        assert!(receipt["note"].as_str().unwrap().contains("no incumbent lead hold to release"));
+
+        let contract = test_contract("lab-director", PathBuf::from("task.md"));
+        let successor = lead_hold_replacement("a director-authored successor method");
+        let mut unvetted = successor.clone();
+        unvetted["extracted_json"]["selected_hypothesis"]["slate_candidate_id"] = json!("unvetted");
+        assert!(project_with_valid_landscape(&paths, &contract, &unvetted).unwrap().is_none());
+        let mut vetted = successor;
+        vetted["extracted_json"]["selected_hypothesis"]["slate_candidate_id"] = json!("c2");
+        project_with_valid_landscape(&paths, &contract, &vetted).unwrap();
+        assert_eq!(progress()["progress"]["current_milestone"], "lead_selected");
+        assert!(!progress()["findings"].as_array().unwrap().iter().any(|f| f["signature"] == "lane_churn:owner_selection:lab_director_requery_followup"));
+    }
+
+    #[test]
     fn a_lead_is_not_replaced_before_its_own_evidence_is_gated() {
         // cycle-g-v91: four replacements in 3.5 hours, each gate review rejecting
         // a lead "no supplied validation executes".

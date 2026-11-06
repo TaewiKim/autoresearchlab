@@ -404,6 +404,53 @@ function readLaneContract(laneDir) {
   );
 }
 
+// MEASURED ON cycle-a-20260919, 2026-11-06: Director 1873 released
+// the document lanes, but their persisted Windows cwd made every Linux spawn
+// fail with ENOENT. Resetting status alone replayed the same stale contract.
+// Rebind only a recognizably relocated lane, retaining the original contract
+// and leaving scientific payloads, external paths and live/finished work alone.
+function rebindRelocatedLaneContract({ cwd, cycleId, laneId, laneDir, contract, stamp }) {
+  if (typeof contract.cwd !== "string" || fs.existsSync(contract.cwd)) return false;
+  if (contract.cycle_id !== cycleId || contract.lane_id !== laneId) return false;
+  const oldPath = /^(?:[a-z]:[\\/]|\\\\)/i.test(contract.cwd) ? path.win32 : path.posix;
+  if (!oldPath.isAbsolute(contract.cwd)) return false;
+  const relative = (value) => {
+    if (typeof value !== "string" || !oldPath.isAbsolute(value)) return null;
+    const rel = oldPath.relative(contract.cwd, value);
+    return rel === ".." || rel.startsWith(`..${oldPath.sep}`) || oldPath.isAbsolute(rel) ? null : rel;
+  };
+  const task = relative(contract.task_file);
+  if (task !== oldPath.join(".research-lab", "lanes", cycleId, laneId, "task.md")
+      || !fs.existsSync(path.join(laneDir, "task.md"))) return false;
+  const finalStatus = safeReadJson(path.join(laneDir, "final-status.json"));
+  // A scientific failure is not an unexecuted lane. Only a runtime spawn
+  // failure (or a lane not started yet) may have its operational paths rebound.
+  if (finalStatus && (finalStatus.status !== "failed"
+      || !/^failed to spawn agent runtime\b/i.test(String(finalStatus.error || "")))) return false;
+  const processInfo = safeReadJson(path.join(laneDir, "process.json")) || {};
+  const runState = safeReadJson(path.join(laneDir, "run-state.json")) || {};
+  if (isPidAlive(processInfo.pid || processInfo.process_id || runState.pid || runState.process_id)
+      || (!finalStatus && fs.existsSync(path.join(laneDir, "run-state.json")))) return false;
+  const rebind = (value) => {
+    const rel = relative(value);
+    return rel === null ? value : path.join(cwd, ...rel.split(oldPath.sep));
+  };
+  const repaired = { ...contract, cwd, task_file: rebind(contract.task_file),
+    allowed_inputs: (contract.allowed_inputs || []).map(rebind),
+    allowed_outputs: (contract.allowed_outputs || []).map(rebind),
+    output_artifact: rebind(contract.output_artifact) };
+  const contractPath = path.join(laneDir, "lane-contract.json");
+  fs.copyFileSync(contractPath, `${contractPath}.self-heal-${stamp}.bak`, fs.constants.COPYFILE_EXCL);
+  const temporary = `${contractPath}.self-heal-${stamp}.tmp`;
+  try {
+    fs.writeFileSync(temporary, `${JSON.stringify(repaired, null, 2)}\n`, { flag: "wx" });
+    fs.renameSync(temporary, contractPath);
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
+  return true;
+}
+
 // Age-based reaping is a backstop for lanes whose PID we cannot positively
 // verify as dead (e.g. after a restart, when the OS may have recycled the pid),
 // and for genuinely detached/hung codex lanes. It MUST sit above the runtime's
@@ -542,7 +589,7 @@ function fileContainsRuntimeEmittedRetryableText(filePath) {
   return false;
 }
 
-function healLaneDirectory({ laneDir, laneId, nowMs, staleSeconds, stamp, forceFailedRetry }) {
+function healLaneDirectory({ cwd, cycleId, laneDir, laneId, nowMs, staleSeconds, stamp, forceFailedRetry }) {
   const actions = [];
   const finalStatusPath = path.join(laneDir, "final-status.json");
   const runStatePath = path.join(laneDir, "run-state.json");
@@ -558,6 +605,9 @@ function healLaneDirectory({ laneDir, laneId, nowMs, staleSeconds, stamp, forceF
   const runState = parsedRunState || {};
   const processInfo = safeReadJson(processPath) || {};
   const contract = readLaneContract(laneDir);
+  if (rebindRelocatedLaneContract({ cwd, cycleId, laneId, laneDir, contract, stamp })) {
+    actions.push({ lane_id: laneId, action: "rebind_relocated_lane_contract", previous_cwd: contract.cwd, cwd });
+  }
   const resultStatus = readResultStatus(resultPath);
 
   // MEASURED ON cycle-a-20260919, 2026-10-04: followup-analyst-347
@@ -746,7 +796,7 @@ function healCycleOnce({ cwd, cycleId, error = null, staleSeconds = 1800, forceF
     for (const laneId of fs.readdirSync(lanesRoot)) {
       const laneDir = path.join(lanesRoot, laneId);
       if (!fs.statSync(laneDir).isDirectory()) continue;
-      actions.push(...healLaneDirectory({ laneDir, laneId, nowMs: Date.now(), staleSeconds, stamp, forceFailedRetry }));
+      actions.push(...healLaneDirectory({ cwd, cycleId, laneDir, laneId, nowMs: Date.now(), staleSeconds, stamp, forceFailedRetry }));
     }
   }
 

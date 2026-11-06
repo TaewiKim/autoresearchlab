@@ -14,6 +14,7 @@ const { isReportingStandardRubric, reportingRubricApplies } = require("./reviews
 const { leadProtectionPrefix } = require("./reviews/gate/actions");
 const hypothesisProgress = require("./hypothesis_progress");
 const { recordReviewSnapshot } = require("./review_history");
+const { applyPublishedGateDispositions } = require("./gate_blocker_dispositions");
 const { selectedLeadIdentity, selectedLeadReviewIdentity, reviewMatchesSelectedLead } = require("../agents/shared/lead_evidence_match");
 
 // The conclusion review is a THIRD path that asks the LabDirector to requery,
@@ -587,8 +588,12 @@ function buildConclusionReview({ cwd = process.cwd(), cycleId, researcherView, f
     promotionArtifacts,
   });
   const gatekeeperScores = gatekeeperRubricScoreMap({ root, cycleId, fs });
-  const rubric = capConclusionRubricByGatekeeper(artifactAdjusted.rubric, gatekeeperScores);
-  const blockers = artifactAdjusted.blockers;
+  const dispositionAdjusted = applyPublishedGateDispositions({
+    root, cycleId, fs,
+    rubric: capConclusionRubricByGatekeeper(artifactAdjusted.rubric, gatekeeperScores),
+    blockers: artifactAdjusted.blockers,
+  });
+  const { rubric, blockers } = dispositionAdjusted;
   const adjustedScore = averageApplicableRubricScore(rubric);
   const score = adjustedScore == null ? rawScore : adjustedScore;
   const gatedBlockers = rubric
@@ -642,7 +647,7 @@ function buildConclusionReview({ cwd = process.cwd(), cycleId, researcherView, f
   const allRubricsApproved =
     rubric.filter((item) => item?.applicable !== false).length > 0 &&
     rubric.filter((item) => item?.applicable !== false).every((item) => Number(item.score || 0) >= GATE_THRESHOLD);
-  const conclusionGatePassed = score >= GATE_THRESHOLD && gatedBlockers.length === 0;
+  const conclusionGatePassed = score >= GATE_THRESHOLD && allRubricsApproved && gatedBlockers.length === 0;
   const mode = conclusionGatePassed ? "hold" : score >= GATE_THRESHOLD - 5 ? "nudge" : "refine";
   const saturatedRubrics = updateRubricFollowupAttempts({ root, cycleId, fs, rubric });
   const followupActions = [
@@ -673,6 +678,7 @@ function buildConclusionReview({ cwd = process.cwd(), cycleId, researcherView, f
     conclusion_blockers: gatedBlockers,
     conclusion_rubric: rubric,
     promotion_artifact_resolution: artifactAdjusted.promotion_artifact_resolution,
+    gate_blocker_adjudication_resolution: dispositionAdjusted.gate_blocker_adjudication_resolution,
     raw_conclusion_score: rawScore,
     raw_conclusion_blockers: rawBlockers,
     raw_conclusion_rubric: rawRubric,

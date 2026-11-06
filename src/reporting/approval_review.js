@@ -1,5 +1,7 @@
 "use strict";
 
+const { applyPublishedGateDispositions } = require("./gate_blocker_dispositions");
+
 const fs = require("fs");
 const path = require("path");
 const { appendReviewOnce } = require("../observability/cycle_logs");
@@ -528,6 +530,9 @@ function buildApprovalReview({
     blockers: rawBlockers,
     promotionArtifacts,
   });
+  const dispositionAdjusted = applyPublishedGateDispositions({
+    root, cycleId, rubric: artifactAdjusted.rubric, blockers: artifactAdjusted.blockers,
+  });
   const artifactScore = averageApplicableRubricScore(artifactAdjusted.rubric);
   const hasResolvedPromotionArtifact = Object.values(promotionArtifacts?.resolved || {}).some(Boolean);
   const heuristicScore = hasResolvedPromotionArtifact && artifactScore != null ? artifactScore : score;
@@ -544,8 +549,8 @@ function buildApprovalReview({
     finalClaimPackage?.research_outcome === "approved" &&
     finalClaimPackage?.high_impact_document_gates_passed === true &&
     finalClaimPackage?.hypothesis_gate_passed !== false;
-  const rubric = annotateRubricConfidence({ rubric: artifactAdjusted.rubric, gateReview: gateReviewForRubric, cycleState });
-  const blockerArbitration = arbitrateBlockers({ blockers: artifactAdjusted.blockers, cycleState });
+  const rubric = annotateRubricConfidence({ rubric: dispositionAdjusted.rubric, gateReview: gateReviewForRubric, cycleState });
+  const blockerArbitration = arbitrateBlockers({ blockers: dispositionAdjusted.blockers, cycleState });
   const blockers = blockerArbitration.blockers;
   const rubricProvenance = {
     confidence_counts: rubric.reduce((acc, item) => {
@@ -661,6 +666,7 @@ function buildApprovalReview({
     approval_blockers: effectiveBlockers,
     approval_rubric: rubric,
     promotion_artifact_resolution: artifactAdjusted.promotion_artifact_resolution,
+    gate_blocker_adjudication_resolution: dispositionAdjusted.gate_blocker_adjudication_resolution,
     raw_approval_blockers: rawBlockers,
     raw_approval_rubric: rawRubric,
     rubric_provenance: rubricProvenance,
