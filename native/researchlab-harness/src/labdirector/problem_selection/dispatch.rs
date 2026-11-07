@@ -275,6 +275,8 @@ fn candidate_brief(candidate: &Value) -> Value {
 
 /// Dispatch whatever the pipeline needs next. Returns the lanes it created.
 pub(crate) fn dispatch_expert_selection(paths: &AppPaths, cycle_id: &str) -> Result<Vec<Value>> {
+    // A withdrawn lead whose director restarted has spent the slate it came from.
+    reopen_selection_for_withdrawn_lead(paths, cycle_id)?;
     if !engage_expert_selection(paths, cycle_id)? {
         return Ok(Vec::new());
     }
@@ -298,6 +300,7 @@ pub(crate) fn dispatch_expert_selection(paths: &AppPaths, cycle_id: &str) -> Res
                 description,
                 json!({
                     "attempt": lanes.len() + 1,
+                    "previous_round": previous_round_context(paths, cycle_id),
                     "previous_attempt": latest_stage_attempt(paths, cycle_id, FIELD_BELIEFS_ACTION),
                     "thresholds": {
                         "belief_min_cards": config.belief_min_cards,
@@ -329,6 +332,7 @@ pub(crate) fn dispatch_expert_selection(paths: &AppPaths, cycle_id: &str) -> Res
                 &description,
                 json!({
                     "attempt": lanes.len() + 1,
+                    "previous_round": previous_round_context(paths, cycle_id),
                     "previous_attempt": latest_stage_attempt(paths, cycle_id, CANDIDATE_SLATE_ACTION),
                     "thresholds": {
                         "slate_min": config.slate_min,

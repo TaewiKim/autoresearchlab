@@ -1197,3 +1197,86 @@ fn a_panel_already_reviewing_with_the_robotics_reviewers_keeps_them() {
     let fresh = panel_personas(&paths, "no-map", &ExpertSelectionConfig::default());
     assert_eq!(fresh.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), vec!["methodology", "adjacent_discipline", "field_generalist", "practitioner"]);
 }
+
+/// MEASURED ON cycle-a-20260919, 2026-11-06: the lead was withdrawn, the
+/// director restarted with no replacement, and every selection stage still read as
+/// done from the first round, so nothing opened a successor search for eight hours.
+#[test]
+fn a_withdrawn_lead_whose_director_restarted_opens_the_next_round() {
+    let temp = TempDir::new().unwrap();
+    let paths = selection_test_paths(temp.path());
+    let cycle = "round-reopen";
+    setup_cycle(&paths, cycle);
+    // Round one, finished: engaged, the owner chose, one slate lane ran.
+    update_expert_selection_state(&paths, cycle, |state| {
+        state.insert("engaged_at".to_string(), json!(now_iso()));
+        state.insert("owner_candidate_ids".to_string(), json!(["cand-a"]));
+        state.insert(
+            "owner_selection".to_string(),
+            json!({"candidate_id": "cand-a", "decision": "candidate_picked", "note": "go"}),
+        );
+    })
+    .unwrap();
+    write_json(&field_beliefs_path(&paths, cycle), &json!({"beliefs": []})).unwrap();
+    write_json(&candidate_slate_path(&paths, cycle), &json!({"candidates": []})).unwrap();
+    write_json(&owner_selection_path(&paths, cycle), &json!({"candidate_id": "cand-a"})).unwrap();
+    let old_slate = "followup-selection-slate-01";
+    let old_dir = lane_root(&paths, cycle, old_slate);
+    fs::create_dir_all(&old_dir).unwrap();
+    write_json(&old_dir.join("role-plan.json"), &json!({"lane_id": old_slate, "action_type": CANDIDATE_SLATE_ACTION})).unwrap();
+    finish(&paths, cycle, old_slate);
+
+    // A live lead: nothing reopens.
+    let lead_path = state_root(&paths).join(format!("{cycle}-lab-director-hypothesis.json"));
+    write_json(&lead_path, &json!({"status": "active", "requery_decision": "uphold", "generated_by": "director-1"})).unwrap();
+    assert!(!reopen_selection_for_withdrawn_lead(&paths, cycle).unwrap());
+    assert!(field_beliefs_path(&paths, cycle).is_file());
+
+    // Withdrawn but not restarted: nothing reopens either.
+    write_json(&lead_path, &json!({"status": "withdrawn", "requery_decision": "defer_for_chronicle", "generated_by": "director-2"})).unwrap();
+    assert!(!reopen_selection_for_withdrawn_lead(&paths, cycle).unwrap());
+
+    // Withdrawn and restarted: the round is spent and the next one opens.
+    write_json(
+        &lead_path,
+        &json!({
+            "status": "withdrawn",
+            "requery_decision": "restart",
+            "generated_by": "director-3",
+            "withdrawn_hypothesis": {"statement": "the dead claim"},
+            "lab_director_decision": {
+                "requery_decision": "restart",
+                "rationale": "the panel cannot identify the claim",
+                "research_problem": {
+                    "question": "does X survive coverage control?",
+                    "methods_tried": [{"method": "slopes", "outcome": "blocked"}],
+                },
+            },
+        }),
+    )
+    .unwrap();
+    let created = dispatch_expert_selection(&paths, cycle).unwrap();
+    assert_eq!(created.len(), 1, "{created:?}");
+    assert_eq!(created[0]["action_type"], json!(FIELD_BELIEFS_ACTION));
+    assert!(!candidate_slate_path(&paths, cycle).exists(), "the spent slate is set aside");
+    assert!(!owner_selection_path(&paths, cycle).exists());
+    let set_aside = fs::read_dir(state_root(&paths))
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().contains(".round1-superseded-"))
+        .count();
+    assert!(set_aside >= 3, "set aside, never deleted: {set_aside}");
+    assert!(recorded_owner_selection(&paths, cycle).is_none());
+    assert!(retired_selection_lane_ids(&paths, cycle).contains(old_slate));
+    assert!(stage_lanes(&paths, cycle, CANDIDATE_SLATE_ACTION).is_empty(), "spent lanes do not count as attempts");
+    let plan = role_plan_of(&paths, cycle, created[0]["lane_id"].as_str().unwrap());
+    let previous = &plan["planner_metadata"]["expert_selection_contract"]["previous_round"];
+    assert_eq!(previous["reopened_for"], json!("director-3"));
+    assert_eq!(previous["withdrawn_lead"]["question_retained"], json!("does X survive coverage control?"));
+    assert_eq!(previous["withdrawn_lead"]["methods_tried"][0]["method"], json!("slopes"));
+
+    // The same withdrawal opens one round, not one per pass.
+    finish(&paths, cycle, created[0]["lane_id"].as_str().unwrap());
+    assert!(!reopen_selection_for_withdrawn_lead(&paths, cycle).unwrap());
+    assert_eq!(expert_selection_state(&paths, cycle)["round"], json!(1));
+}

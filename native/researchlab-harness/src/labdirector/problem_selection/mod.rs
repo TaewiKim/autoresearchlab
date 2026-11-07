@@ -64,6 +64,8 @@ mod panel;
 pub(crate) use panel::*;
 mod projection;
 pub(crate) use projection::*;
+mod rounds;
+pub(crate) use rounds::*;
 mod prompt;
 pub(crate) use prompt::*;
 mod schema;
@@ -524,12 +526,17 @@ pub(crate) fn stage_lanes(paths: &AppPaths, cycle_id: &str, action: &str) -> Vec
     let Ok(entries) = fs::read_dir(cycle_lanes_root(paths, cycle_id)) else {
         return lanes;
     };
+    // Lanes of a spent round (see rounds.rs) are history, not this round's attempts.
+    let retired = retired_selection_lane_ids(paths, cycle_id);
     for entry in entries.flatten() {
         let lane_dir = entry.path();
         if !lane_dir.is_dir() {
             continue;
         }
         let lane_id = entry.file_name().to_string_lossy().to_string();
+        if retired.contains(&lane_id) {
+            continue;
+        }
         let role_plan_path = lane_dir.join("role-plan.json");
         let matches = read_role_plan_index_fields(&role_plan_path)
             .ok()
