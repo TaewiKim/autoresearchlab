@@ -528,6 +528,16 @@ pub(crate) fn stage_lanes(paths: &AppPaths, cycle_id: &str, action: &str) -> Vec
     };
     // Lanes of a spent round (see rounds.rs) are history, not this round's attempts.
     let retired = retired_selection_lane_ids(paths, cycle_id);
+    // MEASURED ON cycle-a-20260919, 2026-11-07: Scout 733's
+    // novelty audit was accepted, then self-healing set its failed runtime
+    // marker aside. The consumed stage stayed "open" forever and blocked the
+    // next candidates after the first three failed feasibility. A validated
+    // projection completes this stage's contract even if the runtime retries.
+    let projected: BTreeSet<String> = read_stage_attempts(paths, cycle_id)
+        .iter()
+        .filter(|attempt| attempt.get("valid").and_then(Value::as_bool) == Some(true))
+        .filter_map(|attempt| selection_text(attempt.get("lane_id")).map(ToString::to_string))
+        .collect();
     for entry in entries.flatten() {
         let lane_dir = entry.path();
         if !lane_dir.is_dir() {
@@ -547,7 +557,7 @@ pub(crate) fn stage_lanes(paths: &AppPaths, cycle_id: &str, action: &str) -> Vec
             continue;
         }
         lanes.push(StageLane {
-            finished: lane_dir.join("final-status.json").exists(),
+            finished: lane_dir.join("final-status.json").exists() || projected.contains(&lane_id),
             lane_id,
             role_plan_path,
         });

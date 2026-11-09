@@ -734,10 +734,22 @@ function documentMilestones(ctx) {
     releasedLanes.set(laneId, Math.min(releasedLanes.get(laneId) || Infinity, parseMs(release.recorded_at)));
   }
   if (!ownerAuthorized && !releasedLanes.size) return null;
-  const decisionMs = artifactMs(ctx.read("lab-director-hypothesis"), ["selected_at_epoch_ms", "updated_at"]);
-  const authorizedMs = Math.max(decisionMs, ownerAuthorized
+  // MEASURED ON cycle-a-20260919, 2026-11-07: later director
+  // withdrawal projections renewed Nov 1 releases, making completed documents
+  // look stale and reviving their path after selection reopened. Only the
+  // authorization receipt starts this contract, not a hypothesis projection.
+  const authorizedMs = ownerAuthorized
     ? artifactMs(authorization, ["authorized_at", "updated_at"])
-    : Math.min(...releasedLanes.values()));
+    : Math.min(...releasedLanes.values());
+  // MEASURED ON cycle-a-20260919, 2026-11-07: a reopened
+  // selection round completed beliefs and a slate, but historical document
+  // releases kept the observer at terminal document_review for 779 minutes.
+  // The scheduler's durable round transition supersedes that older path;
+  // projection rewrites alone must not change which contract we observe.
+  const rounds = ctx.read("expert-selection").value?.rounds;
+  const reopenedMs = Math.max(0, ...(Array.isArray(rounds) ? rounds : [])
+    .map((round) => parseMs(round?.reopened_at)));
+  if (reopenedMs > authorizedMs) return null;
   let laneIds = [...releasedLanes.keys()];
   if (ownerAuthorized) {
     try { laneIds = fs.readdirSync(ctx.lanesDir); } catch { laneIds = []; }

@@ -808,6 +808,67 @@ fn publish_through_feasibility(paths: &AppPaths, cycle: &str) {
 }
 
 #[test]
+fn accepted_novelty_without_runtime_marker_advances_after_feasibility_failures() {
+    // MEASURED ON cycle-a-20260919, 2026-11-07: candidate_feasibility
+    // stalled for 135 minutes, with no owner-candidates and 17 finished lanes.
+    // The top three failed feasibility; their accepted novelty scout's failed
+    // final-status was renamed by self-healing, leaving a phantom open stage.
+    let temp = TempDir::new().unwrap();
+    let paths = selection_test_paths(temp.path());
+    let cycle = "selection-reset-marker";
+    publish_through_feasibility(&paths, cycle);
+    write_json(&novelty_audit_path(&paths, cycle), &json!({"audits":
+        (0..3).map(|i| audit(&format!("cand_{i}"), "novel", false)).collect::<Vec<_>>()
+    })).unwrap();
+    write_json(&candidate_feasibility_path(&paths, cycle), &json!({"assessments":
+        (0..3).map(|i| assessment(&format!("cand_{i}"), "fail")).collect::<Vec<_>>()
+    })).unwrap();
+    let old_lane = "followup-scout-733";
+    let old_dir = lane_root(&paths, cycle, old_lane);
+    fs::create_dir_all(&old_dir).unwrap();
+    write_json(&lane_role_plan_path(&paths, cycle, old_lane), &json!({
+        "action_type": NOVELTY_REFUTATION_ACTION
+    })).unwrap();
+    write_json(&old_dir.join("final-status.json.self-heal.bak"), &json!({
+        "status": "failed", "failure_category": "adaptive_literature_search_incomplete"
+    })).unwrap();
+    record_stage_attempt(&paths, cycle, NOVELTY_REFUTATION_ACTION, old_lane, true, &[], &[]).unwrap();
+    assert!(!owner_candidates_path(&paths, cycle).exists());
+    assert_eq!(expert_selection_progress(&paths, cycle).stage, "novelty_refutation");
+
+    let created = dispatch_expert_selection(&paths, cycle).unwrap();
+    assert_eq!(created.len(), 1, "the consumed scout must not hold the next batch");
+    let novelty_lane = created_ids(&created).remove(0);
+    let plan = role_plan_of(&paths, cycle, &novelty_lane);
+    assert_eq!(assigned_candidate_ids(Some(&plan)), vec!["cand_3", "cand_4", "cand_5"]);
+    // A genuinely unprojected open batch still prevents duplicate dispatch.
+    assert!(dispatch_expert_selection(&paths, cycle).unwrap().is_empty());
+    write_json(&lane_root(&paths, cycle, &novelty_lane).join(NOVELTY_AUDIT_OUTPUT_FILE), &json!({"audits":
+        (3..6).map(|i| audit(&format!("cand_{i}"), "novel", false)).collect::<Vec<_>>()
+    })).unwrap();
+    project_expert_selection_lane(&paths, &contract_of(&paths, cycle, &novelty_lane), Some(&plan), &json!({})).unwrap();
+    finish(&paths, cycle, &novelty_lane);
+
+    let created = dispatch_expert_selection(&paths, cycle).unwrap();
+    assert_eq!(created.len(), 1);
+    let feasibility_lane = created_ids(&created).remove(0);
+    let plan = role_plan_of(&paths, cycle, &feasibility_lane);
+    assert_eq!(plan["action_type"], json!(FEASIBILITY_AUDIT_ACTION));
+    project_expert_selection_lane(&paths, &contract_of(&paths, cycle, &feasibility_lane), Some(&plan), &json!({"extracted_json": {
+        "assessments": (3..6).map(|i| assessment(&format!("cand_{i}"), "pass")).collect::<Vec<_>>()
+    }})).unwrap();
+    finish(&paths, cycle, &feasibility_lane);
+
+    assert!(dispatch_expert_selection(&paths, cycle).unwrap().is_empty());
+    assert_eq!(expert_selection_progress(&paths, cycle).stage, "awaiting_owner_selection");
+    let owner = read_json(&owner_candidates_path(&paths, cycle)).unwrap();
+    assert!(owner["published_at"].is_string());
+    assert_eq!(owner["candidates"].as_array().unwrap().iter()
+        .map(|card| card["candidate_id"].as_str().unwrap()).collect::<Vec<_>>(), vec!["cand_3", "cand_4", "cand_5"]);
+    assert_eq!(read_json(&shared_pause_marker_path(&paths, cycle)).unwrap()["block_type"], json!(OWNER_SELECTION_BLOCK));
+}
+
+#[test]
 fn the_owner_checkpoint_pauses_lead_selection_until_the_owner_picks_a_survivor() {
     let temp = TempDir::new().unwrap();
     let paths = selection_test_paths(temp.path());

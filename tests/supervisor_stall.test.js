@@ -268,6 +268,174 @@ test("accepted document releases advance a withdrawn cycle past the measured own
   assert.ok(stallFindings({ progress: stuck, config, now: now + 60 * MINUTE }).some((item) => item.kind === "lane_churn"));
 });
 
+test("a reopened selection round advances past historical document_review", (t) => {
+  // MEASURED ON cycle-a-20260919, 2026-11-07: document_review
+  // was pinned at 17:06 on Nov 6 despite a durable selection restart at 05:46
+  // and three completed selection lanes. Old releases remained valid audit
+  // records, but no longer described the pipeline the scheduler was running.
+  const cwd = buildCycle("owner_selection");
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  const now = Date.parse("2026-11-07T06:05:29Z");
+  const config = supervisorConfig({});
+  const observe = (at = now) => recordProgress({ cwd, cycleId: CYCLE, now: at }).progress;
+  const reviewAt = "2026-11-06T17:06:24.829Z";
+  writeState(cwd, "lab-director-hypothesis", {
+    status: "withdrawn", selected_hypothesis: null, requery_decision: "restart",
+    generated_by: "followup-lab-director-1873", updated_at: "2026-11-06T13:58:02Z",
+  });
+  const releases = ["author", "illustrator"].map((role) => {
+    const laneId = `${role}-01`;
+    const laneDir = addFinishedLane(cwd, { laneId, actionType: `${role}:unspecified`,
+      finishedMs: Date.parse("2026-11-06T15:22:09Z") });
+    writeJson(path.join(laneDir, "result.json"), { status: "completed" });
+    return { lane_id: laneId, blocker: "waiting-for-hypothesis-gate gate_passed=false",
+      released_by: "lab-director", rationale: "Bounded methodological-audit closure; scientific gate remains failed.",
+      recorded_at: "2026-11-01T14:21:06Z" };
+  });
+  writeState(cwd, "dependency-gate-overrides", { releases });
+  writeState(cwd, "gate-review", { gate_passed: false, score: 35 });
+  for (const kind of ["report", "paper"]) {
+    writeState(cwd, `${kind}-review`, { ts: reviewAt, [`${kind}_gate_passed`]: false });
+  }
+  writeState(cwd, "expert-selection", { engaged_at: "2026-09-19T14:01:43Z", updated_at: "2026-11-07T06:00:00Z" });
+  const reviewed = observe();
+  assert.equal(reviewed.current_milestone, "document_review", "a projection rewrite does not reopen selection");
+
+  // The scheduler sets aside the spent round, then publishes the new stages.
+  for (const kind of ["field-beliefs", "candidate-slate", "expert-panel", "novelty-audit",
+    "candidate-feasibility", "owner-candidates", "owner-selection"]) {
+    const file = path.join(stateDir(cwd), `${CYCLE}-${kind}.json`);
+    fs.renameSync(file, `${file}.spent-round`);
+  }
+  const completions = [
+    ["followup-selection-beliefs-02", "expert_field_beliefs_map", "2026-11-07T05:48:37Z"],
+    ["followup-selection-slate-02", "expert_candidate_slate", "2026-11-07T05:53:15Z"],
+    ["followup-selection-panel-06", "expert_panel_review", "2026-11-07T06:02:36Z"],
+  ];
+  for (const [laneId, actionType, at] of completions) {
+    addFinishedLane(cwd, { laneId, actionType, finishedMs: Date.parse(at) });
+  }
+  // Without the round transition this is precisely the measured trigger state.
+  const stuck = observe();
+  assert.equal(stuck.current_milestone, "document_review");
+  assert.equal(stuck.next_milestone, null);
+  assert.deepEqual(stuck.waiting_on, []);
+  assert.equal(stuck.lanes_since_milestone.total, 3);
+  assert.equal(stallFindings({ progress: stuck, config, now })[0].signature,
+    "no_milestone_progress:document_review");
+
+  writeState(cwd, "expert-selection", {
+    engaged_at: "2026-09-19T14:01:43Z", round: 1,
+    rounds: [{ round: 1, reopened_at: "2026-11-07T05:46:02Z", reopened_for: "followup-lab-director-1873" }],
+  });
+  writeState(cwd, "field-beliefs", { beliefs: [{ belief_id: "b2" }], projected_at: completions[0][2] });
+  assert.equal(observe().current_milestone, "field_beliefs");
+  writeState(cwd, "candidate-slate", { candidates: [{ candidate_id: "c2" }], projected_at: completions[1][2] });
+  const advancing = observe();
+  assert.equal(advancing.current_milestone, "candidate_slate");
+  assert.equal(advancing.advanced, true);
+  assert.equal(advancing.next_milestone, "expert_panel", "one panel submission does not finish the panel");
+  assert.equal(advancing.reached_at, "2026-11-07T05:53:15.000Z");
+  assert.deepEqual(stallFindings({ progress: advancing, config, now }), []);
+
+  // A real stall on this new contract must still be detected at the same limit.
+  const later = now + 31 * MINUTE;
+  assert.ok(stallFindings({ progress: observe(later), config, now: later })
+    .some((item) => item.signature === "no_milestone_progress:candidate_slate"));
+  writeState(cwd, "expert-panel", { ranking: [{ candidate_id: "c2" }], projected_at: new Date(later).toISOString() });
+  assert.equal(observe(later).current_milestone, "expert_panel");
+
+  // Fresh document authority can still choose that path after a restart.
+  writeState(cwd, "document-authorization", {
+    authorized: true, reason: "Owner requests a new closure package.", authorized_at: new Date(later).toISOString(),
+  });
+  assert.equal(observe(later).current_milestone, "document_authorized");
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(stateDir(cwd), `${CYCLE}-gate-review.json`))),
+    { gate_passed: false, score: 35 });
+});
+
+test("director projection updates cannot renew historical document authority after selection reopens", (t) => {
+  // MEASURED ON cycle-a-20260919, 2026-11-07: six lanes finished
+  // during a 54-minute document_authorized wait. Documents had completed on
+  // Nov 6 and selection reopened at 05:46, but Director 1885's 07:53 withdrawal
+  // projection was read as fresh authority for the Nov 1 document releases.
+  const cwd = buildCycle("candidate_feasibility");
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  const now = Date.parse("2026-11-07T08:13:52.574Z");
+  const config = supervisorConfig({});
+  const observe = () => recordProgress({ cwd, cycleId: CYCLE, now }).progress;
+  const releases = [];
+  writeState(cwd, "candidate-feasibility", {
+    updated_at: "2026-11-07T06:43:54Z", assessments: [{ candidate_id: "c2", verdict: "fail" }],
+  });
+  for (const [laneId, role, completedAt, releasedAt] of [
+    ["illustrator-01", "illustrator", "2026-11-06T14:47:02Z", "2026-11-01T14:21:06Z"],
+    ["author-01", "author", "2026-11-06T14:56:10Z", "2026-11-01T14:21:06Z"],
+    ["author-02", "author", "2026-11-06T15:22:09Z", "2026-11-01T14:21:06Z"],
+    ["followup-author-01", "author", "2026-11-01T14:22:15Z", "2026-11-01T14:21:06Z"],
+    ["author-01-recovery-01", "author", null, "2026-11-06T15:00:53Z"],
+    ["author-02-recovery-01", "author", null, "2026-11-06T15:24:59Z"],
+  ]) {
+    const laneDir = path.join(cwd, ".research-lab", "lanes", CYCLE, laneId);
+    if (completedAt) {
+      addFinishedLane(cwd, { laneId, actionType: `${role}:unspecified`, finishedMs: Date.parse(completedAt) });
+      writeJson(path.join(laneDir, "result.json"), { status: "completed" });
+    }
+    writeJson(path.join(laneDir, "role-plan.json"), { role });
+    releases.push({ lane_id: laneId, blocker: "waiting-for-hypothesis-gate gate_passed=false",
+      released_by: "lab-director", rationale: "Bounded audit closure; scientific gate remains failed.", recorded_at: releasedAt });
+  }
+  writeState(cwd, "dependency-gate-overrides", { releases });
+  writeState(cwd, "lab-director-hypothesis", {
+    status: "withdrawn", selected_hypothesis: null, requery_decision: "restart",
+    generated_by: "followup-lab-director-1885", selected_at_epoch_ms: 1794038033947,
+    updated_at: "2026-11-07T07:53:53Z",
+  });
+  writeState(cwd, "gate-review", { gate_passed: false, score: 35 });
+  // Output publication still counts when a later director restates withdrawal.
+  assert.equal(observe().current_milestone, "document_outputs");
+  for (const kind of ["report", "paper"]) {
+    writeState(cwd, `${kind}-review`, { ts: "2026-11-07T08:13:12Z", [`${kind}_gate_passed`]: false });
+  }
+  assert.equal(observe().current_milestone, "document_review");
+
+  writeState(cwd, "expert-selection", {
+    round: 1, rounds: [{ reopened_at: "2026-11-07T05:46:02Z", reopened_for: "followup-lab-director-1873" }],
+  });
+  for (let index = 0; index < 6; index += 1) {
+    addFinishedLane(cwd, { laneId: `followup-lab-director-${1880 + index}`,
+      actionType: index < 4 ? "lab_director_requery_followup" : index === 4
+        ? "chronicle_evidence_request_followup" : "gate_restart_followup",
+      finishedMs: Date.parse("2026-11-07T07:25:00Z") + index * 5 * MINUTE });
+  }
+  // The persisted state is the same stuck contract read by the stall trigger.
+  const stuck = { ...observe(), current_milestone: "document_authorized",
+    reached_at: "2026-11-07T07:19:13.870Z", minutes_in_milestone: 54,
+    next_milestone: "document_outputs",
+    waiting_on: ["document_outputs_pending: illustrator and author must complete after authorization"] };
+  writeJson(progressPath({ cwd, cycleId: CYCLE }), stuck);
+  assert.equal(stuck.lanes_since_milestone.total, 6);
+  assert.equal(stallFindings({ progress: stuck, config, now })[0].signature,
+    "no_milestone_progress:document_authorized");
+
+  const resumed = observe();
+  assert.equal(resumed.current_milestone, "candidate_feasibility");
+  assert.equal(resumed.next_milestone, "owner_checkpoint");
+  assert.equal(resumed.advanced, true);
+  assert.ok(!stallFindings({ progress: resumed, config, now })
+    .some((item) => item.signature.includes("document_authorized")));
+  STAGES.owner_checkpoint(cwd);
+  assert.equal(observe().current_milestone, "owner_checkpoint");
+  STAGES.owner_selection(cwd);
+  assert.equal(observe().current_milestone, "owner_selection");
+  writeState(cwd, "document-authorization", {
+    authorized: true, reason: "Owner requests a new closure package.", authorized_at: new Date(now).toISOString(),
+  });
+  assert.equal(observe().current_milestone, "document_authorized", "fresh authority still requires fresh outputs");
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(stateDir(cwd), `${CYCLE}-gate-review.json`))),
+    { gate_passed: false, score: 35 });
+});
+
 test("only accepted document authority takes the alternate path, and a new lead restores scientific selection", (t) => {
   const cwd = buildCycle("owner_selection");
   t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
