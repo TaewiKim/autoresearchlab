@@ -504,6 +504,7 @@ pub(crate) fn dispatch_expert_selection(paths: &AppPaths, cycle_id: &str) -> Res
                     "host": {
                         "vram_gb": config.host_vram_gb,
                         "local_reference_roots": config.local_reference_roots,
+                        "harness_gpu_probe": harness_gpu_probe(),
                     },
                     "instrument_inventory": instrument_inventory_for_feasibility(paths, cycle_id),
                     "sota_cards": cards.cards.iter().map(|card| expert_compact_card(card, true)).collect::<Vec<_>>(),

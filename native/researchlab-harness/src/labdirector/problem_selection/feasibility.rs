@@ -165,6 +165,37 @@ pub(crate) fn feasibility_assessments(paths: &AppPaths, cycle_id: &str) -> BTree
 
 /// A compact digest of the host's measured instruments, for the feasibility
 /// lane only.
+/// The host's GPU, measured by the harness itself, outside any lane sandbox.
+///
+/// MEASURED ON cycle-a-20260919, 2026-11-07. All seven slate candidates
+/// failed feasibility on "PyTorch reports zero CUDA devices; nvidia-smi: GPU access
+/// blocked by the operating system". The research interpreter run directly in the
+/// container reports `cuda_available=True, device_count=1`; run under the lane
+/// sandbox (`codex sandbox`) it reports False/0 because the sandbox's minimal
+/// `/dev` hides `/dev/dxg`. The auditor could only probe from inside the sandbox,
+/// so it measured the sandbox and recorded it as the host. The harness probes from
+/// outside and hands the result over as the authority on the host's GPU.
+pub(crate) fn harness_gpu_probe() -> Value {
+    let python = env::var("RESEARCHLAB_PYTHON").ok().filter(|value| !value.trim().is_empty()).unwrap_or_else(|| "python3".to_string());
+    let script = "import json\ntry:\n import torch\n n=torch.cuda.device_count()\n print(json.dumps({'torch':torch.__version__,'cuda_available':bool(torch.cuda.is_available()),'device_count':n,'devices':[{'name':torch.cuda.get_device_name(i),'total_memory_gb':round(torch.cuda.get_device_properties(i).total_memory/2**30,1)} for i in range(n)]}))\nexcept Exception as e:\n print(json.dumps({'error':str(e)[:300]}))";
+    let output = std::process::Command::new(&python).args(["-c", script]).output();
+    let mut probe = match output {
+        Ok(out) => serde_json::from_slice::<Value>(out.stdout.split(|b| *b == b'\n').rev().find(|line| !line.is_empty()).unwrap_or(b"{}"))
+            .unwrap_or_else(|_| json!({"error": "probe printed no JSON"})),
+        Err(error) => json!({"error": format!("could not start {python}: {error}")}),
+    };
+    if let Some(object) = probe.as_object_mut() {
+        object.insert("interpreter".to_string(), json!(python));
+        object.insert("measured_at".to_string(), json!(now_iso()));
+        object.insert("measured_by".to_string(), json!("the harness, outside the lane sandbox"));
+        object.insert(
+            "authority".to_string(),
+            json!("Your sandbox hides the GPU device, so a probe run from inside it reads zero CUDA devices on a host that has one. This measurement is the host's GPU. Do not fail a candidate for a GPU your own sandbox cannot see; judge GPU feasibility from this."),
+        );
+    }
+    probe
+}
+
 pub(crate) fn instrument_inventory_for_feasibility(paths: &AppPaths, cycle_id: &str) -> Value {
     let path = state_root(paths).join(format!("{cycle_id}-instrument-inventory.json"));
     match read_json(&path) {
@@ -236,4 +267,22 @@ pub(crate) fn project_feasibility(
         }),
     )?;
     Ok(Some(path))
+}
+
+#[cfg(test)]
+mod gpu_probe_tests {
+    use super::*;
+
+    #[test]
+    fn the_harness_probe_says_who_measured_and_why_it_outranks_the_sandbox() {
+        let probe = harness_gpu_probe();
+        // Whatever the machine has, the probe is always an object that names its
+        // interpreter, its time, its measurer and its authority; a missing torch is
+        // reported as an error, never as zero devices.
+        assert_eq!(probe["measured_by"], json!("the harness, outside the lane sandbox"));
+        assert!(probe["interpreter"].is_string());
+        assert!(probe["measured_at"].is_string());
+        assert!(probe["authority"].as_str().unwrap().contains("sandbox"));
+        assert!(probe.get("cuda_available").is_some() || probe.get("error").is_some(), "{probe}");
+    }
 }
