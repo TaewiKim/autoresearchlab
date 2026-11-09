@@ -1274,7 +1274,7 @@ fn a_withdrawn_lead_whose_director_restarted_opens_the_next_round() {
         state.insert("owner_candidate_ids".to_string(), json!(["cand-a"]));
         state.insert(
             "owner_selection".to_string(),
-            json!({"candidate_id": "cand-a", "decision": "candidate_picked", "note": "go"}),
+            json!({"candidate_id": "cand-a", "decision": "candidate_picked", "note": "go", "selected_at": "2026-10-01T00:00:00Z"}),
         );
     })
     .unwrap();
@@ -1289,12 +1289,12 @@ fn a_withdrawn_lead_whose_director_restarted_opens_the_next_round() {
 
     // A live lead: nothing reopens.
     let lead_path = state_root(&paths).join(format!("{cycle}-lab-director-hypothesis.json"));
-    write_json(&lead_path, &json!({"status": "active", "requery_decision": "uphold", "generated_by": "director-1"})).unwrap();
+    write_json(&lead_path, &json!({"status": "active", "requery_decision": "uphold", "generated_by": "director-1", "updated_at": "2026-11-06T00:00:00Z"})).unwrap();
     assert!(!reopen_selection_for_withdrawn_lead(&paths, cycle).unwrap());
     assert!(field_beliefs_path(&paths, cycle).is_file());
 
     // Withdrawn but not restarted: nothing reopens either.
-    write_json(&lead_path, &json!({"status": "withdrawn", "requery_decision": "defer_for_chronicle", "generated_by": "director-2"})).unwrap();
+    write_json(&lead_path, &json!({"status": "withdrawn", "requery_decision": "defer_for_chronicle", "generated_by": "director-2", "updated_at": "2026-11-06T00:00:00Z"})).unwrap();
     assert!(!reopen_selection_for_withdrawn_lead(&paths, cycle).unwrap());
 
     // Withdrawn and restarted: the round is spent and the next one opens.
@@ -1304,6 +1304,7 @@ fn a_withdrawn_lead_whose_director_restarted_opens_the_next_round() {
             "status": "withdrawn",
             "requery_decision": "restart",
             "generated_by": "director-3",
+            "updated_at": "2026-11-06T00:00:00Z",
             "withdrawn_hypothesis": {"statement": "the dead claim"},
             "lab_director_decision": {
                 "requery_decision": "restart",
@@ -1340,4 +1341,21 @@ fn a_withdrawn_lead_whose_director_restarted_opens_the_next_round() {
     finish(&paths, cycle, created[0]["lane_id"].as_str().unwrap());
     assert!(!reopen_selection_for_withdrawn_lead(&paths, cycle).unwrap());
     assert_eq!(expert_selection_state(&paths, cycle)["round"], json!(1));
+
+    // The owner then releases the new round. The same withdrawn lead, rewritten by
+    // another director lane (a new `generated_by`) but still older than the owner's
+    // choice, must not discard that choice and open a third round.
+    update_expert_selection_state(&paths, cycle, |state| {
+        state.insert(
+            "owner_selection".to_string(),
+            json!({"candidate_id": "release", "decision": "slate_released", "selected_at": "2026-11-09T02:40:34Z"}),
+        );
+    })
+    .unwrap();
+    let mut rewritten = read_json(&lead_path).unwrap();
+    rewritten["generated_by"] = json!("director-4");
+    write_json(&lead_path, &rewritten).unwrap();
+    assert!(!reopen_selection_for_withdrawn_lead(&paths, cycle).unwrap(), "a release answers the withdrawal it follows");
+    assert_eq!(expert_selection_state(&paths, cycle)["round"], json!(1));
+    assert!(recorded_owner_selection(&paths, cycle).is_some());
 }

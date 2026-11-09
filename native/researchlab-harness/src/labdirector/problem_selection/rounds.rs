@@ -94,8 +94,20 @@ pub(crate) fn reopen_selection_for_withdrawn_lead(paths: &AppPaths, cycle_id: &s
         return Ok(false);
     }
     // A round still running has nothing to reopen; only a finished one is spent.
-    if recorded_owner_selection(paths, cycle_id).is_none() {
+    let Some(selection) = recorded_owner_selection(paths, cycle_id) else {
         return Ok(false);
+    };
+    // The withdrawal must come AFTER the owner's choice: it is that choice's lead
+    // that failed. A withdrawal older than the choice is what the choice answers --
+    // MEASURED 2026-11-09: the owner released the second round and the harness,
+    // seeing the same withdrawn lead (rewritten by another director lane, so a new
+    // `generated_by`), discarded the release and opened a third round 17 seconds on.
+    let parse = |text: Option<&str>| text.and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok());
+    let chosen_at = parse(selection.get("selected_at").and_then(Value::as_str));
+    let withdrawn_at = parse(lead.get("updated_at").and_then(Value::as_str));
+    match (chosen_at, withdrawn_at) {
+        (Some(chosen), Some(withdrawn)) if withdrawn > chosen => {}
+        _ => return Ok(false),
     }
     let withdrawn_by = lead.get("generated_by").and_then(Value::as_str).unwrap_or("").to_string();
     let state = expert_selection_state(paths, cycle_id);
