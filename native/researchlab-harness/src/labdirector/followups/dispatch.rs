@@ -86,6 +86,7 @@ pub fn dispatch_followup_lanes(
     let total_followup_cap = total_followup_cap();
     if existing_total_followups >= total_followup_cap {
         notice_followup_budget_spent(paths, cycle_id, existing_total_followups, total_followup_cap);
+        flush_order_trace(paths, cycle_id, "nothing dispatched: the follow-up budget is spent");
         return Ok(created);
     }
 
@@ -343,6 +344,7 @@ pub fn dispatch_followup_lanes(
         }
 
         if ranked_hypotheses.is_empty() && ranked_actions.is_empty() {
+            flush_order_trace(paths, cycle_id, "nothing dispatched: no ranked hypothesis and no ranked action");
             return Ok(created);
         }
 
@@ -361,6 +363,7 @@ pub fn dispatch_followup_lanes(
             &mut created_by_action,
         )?;
     } else if ranked_actions.is_empty() {
+        flush_order_trace(paths, cycle_id, "nothing dispatched: no ranked action");
         return Ok(created);
     }
 
@@ -385,6 +388,7 @@ pub fn dispatch_followup_lanes(
         if created.len() >= max_new_lanes {
             break;
         }
+        trace_order(&action, "considered and dropped by a dispatcher filter");
         let brief_id = action
             .get("brief_id")
             .and_then(Value::as_str)
@@ -644,6 +648,7 @@ pub fn dispatch_followup_lanes(
             gate_challenge_scope = action_candidate_statements.clone();
         }
         gate_challenge_scope.truncate(8);
+        trace_order(&action, "passed the filters; its role's branch opened no lane");
 
         if action_type.starts_with("hypothesis_regeneration") {
             if created.len() < max_new_lanes
@@ -1389,6 +1394,11 @@ pub fn dispatch_followup_lanes(
         }));
     }
 
+    flush_order_trace(
+        paths,
+        cycle_id,
+        &format!("{} lane(s) opened of at most {max_new_lanes}: {}", created.len(), created.iter().filter_map(|lane| lane.get("lane_id").and_then(Value::as_str)).collect::<Vec<_>>().join(", ")),
+    );
     Ok(created)
 }
 

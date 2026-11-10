@@ -186,9 +186,38 @@ pub(crate) fn dispatch_directed_novelty_scout(
     created_by_role: &mut HashMap<String, usize>,
     created_by_action: &mut HashMap<String, usize>,
 ) -> Result<()> {
-    if created.len() >= max_new_lanes
-        || !followup_role_available(role_availability, "scout", action_type, created_by_role, created_by_action)
-    {
+    if created.len() >= max_new_lanes {
+        trace_order(action, "directed scout: this pass's lane budget was already used");
+        return Ok(());
+    }
+    // A director's order does not wait behind the plan's data acquisition.
+    //
+    // MEASURED ON cycle-a-20260919, 2026-11-10 (from the dispatch trace):
+    // "the scout role is not available". The availability rule refuses every scout
+    // action other than data acquisition while a data-acquisition action is ranked
+    // and no data-acquisition scout has ever existed -- so that exploratory scouts
+    // do not run ahead of the data. This cycle gets its data from a simulator: it
+    // has opened 747 scouts and none of that type, the gate review keeps ranking
+    // one, and so the director's audit was refused on every pass, for the hour the
+    // trace was missing and for every earlier request back to director 1913. A
+    // bounded prior-art audit the director wrote is literature work with the
+    // cycle's state in view, not exploration ahead of data.
+    let ordered = FollowupRoleAvailabilityContext {
+        external_validation_required: role_availability.external_validation_required,
+        gate_independence_required: role_availability.gate_independence_required,
+        data_acquisition_query_blocked: role_availability.data_acquisition_query_blocked,
+        has_pending_data_acquisition_action: false,
+        existing_followup_counts: role_availability.existing_followup_counts,
+        existing_action_counts: role_availability.existing_action_counts,
+        open_action_counts: role_availability.open_action_counts,
+        existing_total_followups: role_availability.existing_total_followups,
+        total_followup_cap: role_availability.total_followup_cap,
+        pass_budget_by_role: role_availability.pass_budget_by_role,
+        document_stage_authorized: role_availability.document_stage_authorized,
+        latest_handoff_served: role_availability.latest_handoff_served,
+    };
+    if !followup_role_available(&ordered, "scout", action_type, created_by_role, created_by_action) {
+        trace_order(action, "directed scout: the scout role is not available (budget spent, or a scout novelty lane is already open)");
         return Ok(());
     }
     let attempt = next_dispatch_action_attempt("scout", action_type, existing_action_counts, created_by_action);
@@ -197,9 +226,11 @@ pub(crate) fn dispatch_directed_novelty_scout(
     let scout_task_body = followup_task_markdown(cycle_id, plan_ctx.objective, "scout", brief_id, &scout_description, &no_hypotheses);
     let scout_signature = followup_task_signature(&scout_task_body);
     if existing_signatures.contains(&scout_signature) {
+        trace_order(action, "directed scout: a lane with the identical task already exists");
         return Ok(());
     }
     let lane_id = next_followup_lane_id(paths, cycle_id, "followup-scout-")?;
+    trace_order(action, &format!("lane opened: {lane_id}"));
     let contract_path =
         create_lane_contract(paths, cycle_id, &lane_id, "scout", "codex-agent", "read-write-scoped", &scout_task_body)?;
     let role_plan_path = write_followup_role_plan(

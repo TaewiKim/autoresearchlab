@@ -23,7 +23,9 @@ fn a_directors_bounded_novelty_audit_runs_without_a_lead() {
         external_validation_required: false,
         gate_independence_required: false,
         data_acquisition_query_blocked: false,
-        has_pending_data_acquisition_action: false,
+        // The plan ranks a data acquisition and no data scout has ever existed:
+        // the state that refused the director's audit on every pass.
+        has_pending_data_acquisition_action: true,
         existing_followup_counts: &counts,
         existing_action_counts: &counts,
         open_action_counts: &counts,
@@ -223,5 +225,6 @@ fn an_analyst_handoffs_unmet_capabilities_become_one_engineer_order() {
     append_capability_provisioning_actions(&paths, cycle, &mut ranked);
     assert_eq!(ranked.len(), 1);
     assert_eq!(ranked[0]["preferred_role"], json!("engineer"));
+    assert!(ranked[0]["description"].as_str().unwrap().contains("CAP-OFFLINE-PUSHT-RUNTIME"));
     assert_eq!(ranked[0]["brief_id"], json!(format!("capability-requirements-{analyst}")));
 }

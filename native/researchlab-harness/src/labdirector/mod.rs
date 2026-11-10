@@ -27,7 +27,7 @@ pub(crate) use reference_assets::{
 };
 pub(crate) mod work_orders;
 pub(crate) use work_orders::{
-    announce_work_order_results, append_capability_provisioning_actions,
+    announce_work_order_results, append_capability_provisioning_actions, flush_order_trace, trace_order,
     standing_work_order_payloads, work_order_dispatchable, work_orders_director_context, work_orders_in_flight,
 };
 mod sota_cards;

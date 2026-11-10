@@ -166,6 +166,7 @@ pub(crate) fn append_completed_labdirector_next_actions(
             if !work_order_dispatchable(preferred_role, action_type) {
                 continue;
             }
+            trace_order(action, "read from the ledger");
             let from_earlier_director = action
                 .get("work_order_from_earlier_director")
                 .and_then(Value::as_bool)
@@ -236,6 +237,7 @@ pub(crate) fn append_completed_labdirector_next_actions(
                 && action_type == "methods_followup"
                 && matches!(preferred_role, "analyst" | "lab-runner")
             {
+                trace_order(action, "held: an executable analyst handoff is waiting for its runner");
                 continue;
             }
             let description = action
@@ -257,6 +259,7 @@ pub(crate) fn append_completed_labdirector_next_actions(
                         .unwrap_or(false)
             });
             if already_present {
+                trace_order(action, "queued (the plan already ranks the same action)");
                 continue;
             }
             let mut queued_action = action.clone();
@@ -291,6 +294,7 @@ pub(crate) fn append_completed_labdirector_next_actions(
                 effective_action_type,
                 &source_brief_id,
             )) {
+                trace_order(action, "not queued: a completed lane of its role already carried it out");
                 continue;
             }
             if preferred_role == "analyst" && action_type == "methods_followup" {
@@ -333,6 +337,7 @@ pub(crate) fn append_completed_labdirector_next_actions(
                         "LabDirector selected a replacement lead and requested Analyst-to-LabRunner validation handoff"
                     ])
                 });
+            trace_order(&queued_action, "queued");
             ranked_actions.push(queued_action);
         }
     }

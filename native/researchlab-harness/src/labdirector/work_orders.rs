@@ -689,6 +689,7 @@ pub(crate) fn append_capability_provisioning_actions(paths: &AppPaths, cycle_id:
         if ranked_actions.iter().any(|action| action.get("brief_id").and_then(Value::as_str) == Some(brief_id)) {
             continue;
         }
+        trace_order(&json!({"work_order_id": order.get("order_id")}), "queued");
         ranked_actions.push(json!({
             "brief_id": brief_id,
             "type": CAPABILITY_PROVISIONING_ACTION,
@@ -705,6 +706,44 @@ pub(crate) fn append_capability_provisioning_actions(paths: &AppPaths, cycle_id:
             "blocker_reasons": ["the analyst handoff declares capabilities the engineer owns as not available here"],
         }));
     }
+}
+
+// --- where an order got to in the dispatcher -----------------------------------------
+//
+// MEASURED ON cycle-a-20260919, 2026-11-10: the scout order stood open for
+// an hour of passes and no lane was opened for it. The dispatcher has some forty
+// places an action can be dropped and says nothing at any of them, so "why was this
+// not dispatched" could only be answered by reading the function against the state
+// by hand -- the question this cycle has had to ask most often. An order's last
+// stage in each dispatch is written next to the ledger.
+
+static ORDER_TRACE: std::sync::OnceLock<std::sync::Mutex<BTreeMap<String, String>>> = std::sync::OnceLock::new();
+
+fn order_trace() -> &'static std::sync::Mutex<BTreeMap<String, String>> {
+    ORDER_TRACE.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+}
+
+/// Record how far a work order's action got. A no-op for any other action.
+pub(crate) fn trace_order(action: &Value, stage: &str) {
+    let Some(order_id) = action.get("work_order_id").and_then(Value::as_str) else {
+        return;
+    };
+    if let Ok(mut trace) = order_trace().lock() {
+        trace.insert(order_id.to_string(), stage.to_string());
+    }
+}
+
+pub(crate) fn work_order_trace_path(paths: &AppPaths, cycle_id: &str) -> PathBuf {
+    state_root(paths).join(format!("{cycle_id}-work-order-dispatch-trace.json"))
+}
+
+/// Write the stages of this dispatch and start the next one clean.
+pub(crate) fn flush_order_trace(paths: &AppPaths, cycle_id: &str, outcome: &str) {
+    let stages = order_trace().lock().map(|mut trace| std::mem::take(&mut *trace)).unwrap_or_default();
+    let _ = write_json(
+        &work_order_trace_path(paths, cycle_id),
+        &json!({"at": now_iso(), "dispatch": outcome, "last_stage_by_order": stages}),
+    );
 }
 
 /// Whether work a director ordered is still being carried out.
