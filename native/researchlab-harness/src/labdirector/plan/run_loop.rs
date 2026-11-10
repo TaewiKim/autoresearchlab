@@ -390,6 +390,10 @@ pub fn run_plan(
             // bound to its queue, one Codex scout reviews it. The harvest lane's
             // own pending_review handoff does not survive a self-heal reset.
             pre_created_followups.extend(dispatch_frontier_review(paths, cycle_id)?);
+            // The cards' reference code and checkpoints, fetched in the background
+            // so the reproduction anchor has something to run against. A failure to
+            // start the fetch never stops the cycle.
+            let _ = ensure_reference_assets(paths, cycle_id);
             // Then the SOTA deep read: ~10 landscape papers read in full, one
             // card each. See labdirector::sota_cards.
             pre_created_followups.extend(dispatch_sota_deep_read_scout(paths, cycle_id)?);

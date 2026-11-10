@@ -19,6 +19,12 @@ pub(crate) use frontier_harvest::{
 };
 // Full-text deep reads of the landscape's SOTA papers, published as cards for
 // the problem selection below. Named exports only.
+// Reference code and checkpoints the cards name, fetched by the harness.
+mod reference_assets;
+pub(crate) use reference_assets::{
+    ensure_reference_assets, reference_assets_plan, reference_assets_running,
+    reference_assets_summary, reference_root,
+};
 mod sota_cards;
 pub(crate) use sota_cards::{
     dispatch_sota_deep_read_scout, project_sota_cards, sha256_hex, sota_deep_read_scout_protocol,

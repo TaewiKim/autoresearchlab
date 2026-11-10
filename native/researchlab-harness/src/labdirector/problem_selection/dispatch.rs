@@ -473,6 +473,11 @@ pub(crate) fn dispatch_expert_selection(paths: &AppPaths, cycle_id: &str) -> Res
             if !stage_dispatch_allowed(paths, cycle_id, FEASIBILITY_AUDIT_ACTION, &lanes, &config) {
                 return Ok(created);
             }
+            // The audit judges what is on disk: wait while the harness is still
+            // fetching the cards' sources, so a source in flight is not "absent".
+            if reference_assets_running(paths, cycle_id) {
+                return Ok(created);
+            }
             let slate = published_candidate_slate(paths, cycle_id).unwrap_or(Value::Null);
             let audits = novelty_audits(paths, cycle_id);
             let targets = funnel.feasibility_pending.clone();
@@ -503,7 +508,13 @@ pub(crate) fn dispatch_expert_selection(paths: &AppPaths, cycle_id: &str) -> Res
                     "candidates": candidates,
                     "host": {
                         "vram_gb": config.host_vram_gb,
-                        "local_reference_roots": config.local_reference_roots,
+                        "local_reference_roots": config
+                            .local_reference_roots
+                            .iter()
+                            .cloned()
+                            .chain(std::iter::once(reference_root(paths).display().to_string()))
+                            .collect::<Vec<_>>(),
+                        "reference_assets": reference_assets_summary(paths, cycle_id),
                         "harness_gpu_probe": harness_gpu_probe(),
                     },
                     "instrument_inventory": instrument_inventory_for_feasibility(paths, cycle_id),

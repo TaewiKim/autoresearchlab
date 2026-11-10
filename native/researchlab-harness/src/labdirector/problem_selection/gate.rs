@@ -180,6 +180,7 @@ pub(crate) fn expert_selection_director_context(paths: &AppPaths, cycle_id: &str
         }),
         "selected_candidate": selection.as_ref().and_then(|value| value.get("candidate").cloned()).unwrap_or(Value::Null),
         "owner_vetted_candidate_ids": owner_candidate_ids(paths, cycle_id),
+        "reference_assets": reference_assets_summary(paths, cycle_id),
         "owner_candidates_markdown_path": owner_candidates_markdown_path(paths, cycle_id),
         "selection_rule": if OwnerDecision::of_selection(selection.as_ref()) == OwnerDecision::SlateReleased {
             json!(OwnerDecision::SlateReleased.lead_rule())
