@@ -240,6 +240,57 @@ fn wait_for_child_exit_after_kill(child: &mut Child, grace: Duration) -> bool {
     }
 }
 
+/// Let a refresh that is running finish before a lane that measures or uses the
+/// machine starts. Returns how long it waited.
+///
+/// MEASURED ON cycle-a-20260919, 2026-11-10. The lane that finishes runs
+/// `refresh-cycle` on its way out, and the next lane is launched as soon as the
+/// first one's status is final: the two overlap. On this cycle the refresh is a
+/// node process of 2.7 GB resident in a 6 GB machine. followup-engineer-1257 was
+/// ordered to repeat a checkpoint load that had peaked at 2.67 GB, measured
+/// 1.65 GB available in its first minute -- the refresh of the lane before it --
+/// and stopped: "the measured blocker is available host memory". The memory was
+/// the harness's own, and it would have been back a minute later.
+pub(crate) fn wait_for_cycle_refresh(paths: &AppPaths, cycle_id: &str, max_wait: Duration) -> Duration {
+    let lock_path = paths.runtime_root.join("state").join(format!("{cycle_id}-refresh-cycle.lock"));
+    let started = Instant::now();
+    while lock_path.exists() && !refresh_lock_owner_inactive(&lock_path) && started.elapsed() < max_wait {
+        std::thread::sleep(Duration::from_secs(2).min(max_wait));
+    }
+    started.elapsed()
+}
+
+#[cfg(test)]
+mod refresh_wait_tests {
+    use super::*;
+
+    #[test]
+    fn a_lane_does_not_wait_for_a_refresh_that_is_not_running() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let paths = AppPaths {
+            project_root: temp.path().to_path_buf(),
+            runtime_root: temp.path().join(".research-lab"),
+            data_root: temp.path().join("data"),
+            stats_driver_script: PathBuf::new(),
+            literature_driver_script: PathBuf::new(),
+        };
+        fs::create_dir_all(paths.runtime_root.join("state")).unwrap();
+        let cycle = "refresh-wait";
+        assert!(wait_for_cycle_refresh(&paths, cycle, Duration::from_secs(30)) < Duration::from_secs(1), "no lock");
+        // A lock whose owner is gone is not a refresh in progress.
+        fs::write(paths.runtime_root.join("state").join(format!("{cycle}-refresh-cycle.lock")), "pid=0\n").unwrap();
+        assert!(wait_for_cycle_refresh(&paths, cycle, Duration::from_secs(30)) < Duration::from_secs(1), "dead owner");
+        // A live owner is waited for, and only as long as allowed.
+        fs::write(
+            paths.runtime_root.join("state").join(format!("{cycle}-refresh-cycle.lock")),
+            format!("pid={}\n", std::process::id()),
+        )
+        .unwrap();
+        let waited = wait_for_cycle_refresh(&paths, cycle, Duration::from_millis(300));
+        assert!(waited >= Duration::from_millis(300) && waited < Duration::from_secs(5), "{waited:?}");
+    }
+}
+
 fn refresh_lock_owner_inactive(lock_path: &Path) -> bool {
     let Ok(raw) = fs::read_to_string(lock_path) else {
         return false;

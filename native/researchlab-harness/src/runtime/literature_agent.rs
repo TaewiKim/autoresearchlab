@@ -160,19 +160,56 @@ fn apply_assessment(payload: &mut Value, candidate_papers: &Value, assessment: V
     ready
 }
 
+/// Whether a lane's result is held to the adaptive-search completion contract.
+///
+/// MEASURED ON cycle-a-20260919, 2026-11-10. Scout 738 carried out the
+/// director's bounded audit exactly as written -- one lookup, eight abstracts, a
+/// terminal disposition -- and was marked failed, `adaptive_literature_search_incomplete`,
+/// because one lookup is not a saturated search. The failure opened a resume lane
+/// (739), which made no request because the lookup was already consumed and failed
+/// the same way, which opened 740; two directors were opened only to retire them.
+/// An audit whose bounds the director set is complete when it returns its
+/// disposition. The adaptive contract is for lanes asked to search a field.
+pub(super) fn literature_completion_applies(role: &str, role_plan: Option<&Value>) -> bool {
+    if role != "scout" {
+        return false;
+    }
+    if matches!(
+        role_plan_action_type(role_plan),
+        // A deep read writes cards, not a search journal (labdirector::sota_cards).
+        "data_acquisition_followup" | "reasoning_data_scout" | crate::labdirector::SOTA_DEEP_READ_ACTION
+    ) {
+        return false;
+    }
+    role_plan
+        .and_then(|plan| plan.pointer("/planner_metadata/novelty_mode"))
+        .and_then(Value::as_str)
+        != Some("director-directed-audit")
+}
+
+#[cfg(test)]
+mod completion_scope_tests {
+    use super::*;
+
+    #[test]
+    fn a_directors_bounded_audit_is_not_held_to_the_adaptive_search_contract() {
+        let search = json!({"action_type": "novelty_followup", "planner_metadata": {"novelty_mode": "open-search"}});
+        let audit = json!({"action_type": "novelty_followup", "planner_metadata": {"novelty_mode": "director-directed-audit"}});
+        assert!(literature_completion_applies("scout", Some(&search)));
+        assert!(literature_completion_applies("scout", None));
+        assert!(!literature_completion_applies("scout", Some(&audit)));
+        assert!(!literature_completion_applies("analyst", Some(&search)));
+        assert!(!literature_completion_applies("scout", Some(&json!({"action_type": "data_acquisition_followup"}))));
+    }
+}
+
 pub(super) fn enforce_literature_agent_completion(
     paths: &AppPaths,
     contract: &LaneContract,
     role_plan: Option<&Value>,
     payload: &mut Value,
 ) -> Result<Option<&'static str>> {
-    if contract.role != "scout"
-        || matches!(
-            role_plan_action_type(role_plan),
-            // A deep read writes cards, not a search journal (labdirector::sota_cards).
-            "data_acquisition_followup" | "reasoning_data_scout" | crate::labdirector::SOTA_DEEP_READ_ACTION
-        )
-    {
+    if !literature_completion_applies(&contract.role, role_plan) {
         return Ok(None);
     }
     let lane_dir = contract.task_file.parent().unwrap_or(&contract.cwd);

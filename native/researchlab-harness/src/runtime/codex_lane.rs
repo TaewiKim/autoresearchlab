@@ -1947,6 +1947,18 @@ pub(crate) fn run_codex_agent_lane(
         ));
     }
 
+    // A lane that installs, loads or measures starts on a quiet machine; see
+    // wait_for_cycle_refresh.
+    if lane_provisions_environment(&contract.role, action_type) {
+        let waited = super::lane_lifecycle::wait_for_cycle_refresh(paths, &contract.cycle_id, Duration::from_secs(240));
+        if waited >= Duration::from_secs(2) {
+            eprintln!(
+                "[researchlab-harness] {} waited {}s for the cycle refresh to finish before starting",
+                contract.lane_id,
+                waited.as_secs()
+            );
+        }
+    }
     let auth = auth_status(paths)?;
     let requested_runtime = agent_runtime();
     let runtime = resolve_agent_runtime(requested_runtime);
