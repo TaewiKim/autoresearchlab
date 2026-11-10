@@ -181,10 +181,34 @@ pub(super) fn literature_completion_applies(role: &str, role_plan: Option<&Value
     ) {
         return false;
     }
-    role_plan
-        .and_then(|plan| plan.pointer("/planner_metadata/novelty_mode"))
-        .and_then(Value::as_str)
-        != Some("director-directed-audit")
+    !role_plan.is_some_and(originates_from_directed_audit)
+}
+
+/// Whether this lane is a director's bounded audit, or a resume of one.
+///
+/// The resume lanes (739, 740, 741 on the measured cycle) carry no mode of their
+/// own; each names the role plan of the lane it resumes, so the origin is found by
+/// walking back. Without this a chain already begun never ends: each resume fails
+/// the adaptive contract and recommends the next.
+fn originates_from_directed_audit(role_plan: &Value) -> bool {
+    let mut plan = role_plan.clone();
+    for _ in 0..12 {
+        if plan.pointer("/planner_metadata/novelty_mode").and_then(Value::as_str) == Some("director-directed-audit") {
+            return true;
+        }
+        let Some(source) = plan
+            .pointer("/planner_metadata/review_action/literature_review_role_plan_path")
+            .and_then(Value::as_str)
+            .map(std::path::PathBuf::from)
+        else {
+            return false;
+        };
+        let Some(next) = read_optional(&source) else {
+            return false;
+        };
+        plan = next;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -200,6 +224,19 @@ mod completion_scope_tests {
         assert!(!literature_completion_applies("scout", Some(&audit)));
         assert!(!literature_completion_applies("analyst", Some(&search)));
         assert!(!literature_completion_applies("scout", Some(&json!({"action_type": "data_acquisition_followup"}))));
+
+        // A resume of a resume of the audit is still the audit.
+        let temp = tempfile::TempDir::new().unwrap();
+        let origin = temp.path().join("audit-role-plan.json");
+        let first = temp.path().join("resume-1-role-plan.json");
+        fs::write(&origin, audit.to_string()).unwrap();
+        let resume = |source: &std::path::Path| json!({"action_type": "adaptive_search_followup",
+            "planner_metadata": {"review_action": {"literature_review_role_plan_path": source}}});
+        fs::write(&first, resume(&origin).to_string()).unwrap();
+        assert!(!literature_completion_applies("scout", Some(&resume(&first))));
+        // A resume of an ordinary search is still a search.
+        fs::write(&origin, search.to_string()).unwrap();
+        assert!(literature_completion_applies("scout", Some(&resume(&first))));
     }
 }
 
