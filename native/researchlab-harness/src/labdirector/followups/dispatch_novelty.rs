@@ -27,6 +27,41 @@ pub(crate) fn dispatch_novelty_followups(
     }
 
     if assigned_selected_hypotheses.is_empty() {
+        // MEASURED ON cycle-a-20260919, 2026-11-10. Directors 1913 and 1914
+        // each asked for one bounded scout audit of the successor they were weighing
+        // ("one OpenAlex-only lookup, at most eight abstracts ... return a terminal
+        // disposition"). The lead was withdrawn, so there was no lead statement to
+        // take from the artifact and the converging branch below returned having
+        // dispatched nothing; the audit was authorized by name in the next director's
+        // notes as "already authorized" and never ran, and each director asked
+        // again. An action a director wrote, with its own instruction, needs no
+        // lead to be carried out.
+        let from_director = action.get("source_lab_director_lane_id").and_then(Value::as_str).is_some();
+        let lead_has_statement = current_lead_under_review(paths, cycle_id)
+            .get("statement")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty());
+        if from_director && !lead_has_statement && !description.trim().is_empty() {
+            dispatch_directed_novelty_scout(
+                paths,
+                cycle_id,
+                max_new_lanes,
+                plan_ctx,
+                role_availability,
+                existing_action_counts,
+                action,
+                action_type,
+                brief_id,
+                description,
+                target_rubric,
+                action_candidate_payload,
+                created,
+                existing_signatures,
+                created_by_role,
+                created_by_action,
+            )?;
+            return Ok(true);
+        }
         if is_converging {
             // Converging suppresses WIDENING the hypothesis space, which is
             // right: the open branch below tells a scout to enumerate every
@@ -128,6 +163,82 @@ pub(crate) fn dispatch_novelty_followups(
         created_by_action,
     )?;
     Ok(true)
+}
+
+/// One scout, carrying out exactly the audit a director wrote. No widening: the
+/// open branch adds "search broadly" to whatever it is given, which would
+/// contradict a director's bounded instruction.
+pub(crate) fn dispatch_directed_novelty_scout(
+    paths: &AppPaths,
+    cycle_id: &str,
+    max_new_lanes: usize,
+    plan_ctx: &DispatchPlanContext<'_>,
+    role_availability: &FollowupRoleAvailabilityContext<'_>,
+    existing_action_counts: &HashMap<String, usize>,
+    action: &Value,
+    action_type: &str,
+    brief_id: &str,
+    description: &str,
+    target_rubric: &str,
+    action_candidate_payload: &[Value],
+    created: &mut Vec<Value>,
+    existing_signatures: &mut HashSet<String>,
+    created_by_role: &mut HashMap<String, usize>,
+    created_by_action: &mut HashMap<String, usize>,
+) -> Result<()> {
+    if created.len() >= max_new_lanes
+        || !followup_role_available(role_availability, "scout", action_type, created_by_role, created_by_action)
+    {
+        return Ok(());
+    }
+    let attempt = next_dispatch_action_attempt("scout", action_type, existing_action_counts, created_by_action);
+    let scout_description = format!("{} [attempt {attempt}]", description.trim());
+    let no_hypotheses: Vec<String> = Vec::new();
+    let scout_task_body = followup_task_markdown(cycle_id, plan_ctx.objective, "scout", brief_id, &scout_description, &no_hypotheses);
+    let scout_signature = followup_task_signature(&scout_task_body);
+    if existing_signatures.contains(&scout_signature) {
+        return Ok(());
+    }
+    let lane_id = next_followup_lane_id(paths, cycle_id, "followup-scout-")?;
+    let contract_path =
+        create_lane_contract(paths, cycle_id, &lane_id, "scout", "codex-agent", "read-write-scoped", &scout_task_body)?;
+    let role_plan_path = write_followup_role_plan(
+        paths,
+        cycle_id,
+        &lane_id,
+        "scout",
+        assigned_model_for_role("scout", "codex-agent"),
+        plan_ctx.objective,
+        brief_id,
+        &scout_description,
+        action_type,
+        &no_hypotheses,
+        action_candidate_payload,
+        Some(plan_ctx.schema_quality),
+        Some(plan_ctx.reasoning_graph),
+        Some(plan_ctx.data_graph),
+        plan_ctx.open_validation_gaps,
+        json!({
+            "priority_source": "recommended_followup_action",
+            "preferred_role": "scout",
+            "target_rubric": if target_rubric.is_empty() { Value::Null } else { json!(target_rubric) },
+            "blocker_reasons": action.get("blocker_reasons").cloned().unwrap_or_else(|| json!([])),
+            "novelty_mode": "director-directed-audit",
+            "source_lab_director_lane_id": action.get("source_lab_director_lane_id").cloned().unwrap_or(Value::Null),
+            "selection_scope": "director-directed",
+        }),
+    )?;
+    existing_signatures.insert(scout_signature);
+    *created_by_role.entry("scout".to_string()).or_insert(0) += 1;
+    *created_by_action.entry(format!("scout::{action_type}")).or_insert(0) += 1;
+    created.push(json!({
+        "lane_id": lane_id,
+        "role": "scout",
+        "contract_path": contract_path,
+        "source_brief_id": brief_id,
+        "role_plan_path": role_plan_path,
+    }));
+    Ok(())
 }
 
 pub(crate) fn dispatch_open_novelty_followups(

@@ -24,6 +24,7 @@ include!("tests/contract_matches_schema.rs");
 include!("tests/gate_sees_the_lead.rs");
 include!("tests/dispatch_starvation.rs");
 include!("tests/orphan_reconciliation.rs");
+include!("tests/directed_novelty_scout.rs");
 include!("tests/gate_dispatch_01.rs");
 include!("tests/gate_dispatch_02.rs");
 include!("tests/gate_dispatch_03.rs");
