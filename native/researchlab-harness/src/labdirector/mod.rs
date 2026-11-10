@@ -22,7 +22,7 @@ pub(crate) use frontier_harvest::{
 // Reference code and checkpoints the cards name, fetched by the harness.
 mod reference_assets;
 pub(crate) use reference_assets::{
-    ensure_reference_assets, reference_assets_plan, reference_assets_running,
+    announce_reference_assets, ensure_reference_assets, reference_assets_plan, reference_assets_running,
     reference_assets_summary, reference_root,
 };
 mod sota_cards;

@@ -202,6 +202,80 @@ pub(crate) fn ensure_reference_assets(paths: &AppPaths, cycle_id: &str) -> Resul
     Ok(true)
 }
 
+fn reference_announced_path(paths: &AppPaths, cycle_id: &str) -> PathBuf {
+    state_root(paths).join(format!("{cycle_id}-reference-assets-announced.json"))
+}
+
+/// The one message a director is owed when the sources arrive: due when a fetch
+/// COMPLETED, the cycle has no live lead, and this plan has not been announced.
+///
+/// MEASURED ON cycle-a-20260919, 2026-11-10. The sources arrived after
+/// the last director had already declined for want of them and nothing is
+/// scheduled to ask again: the supervisor's "decision stalled" requests collapse
+/// onto ids answered long ago. A change in what the director can see is a reason
+/// to ask it once, not a reason to loop it.
+pub(crate) fn reference_assets_announcement_due(paths: &AppPaths, cycle_id: &str) -> Option<(String, String)> {
+    let state = read_json(&reference_state_path(paths, cycle_id)).ok()?;
+    if state.get("status").and_then(Value::as_str) != Some("complete") {
+        return None;
+    }
+    let fingerprint = read_json(&reference_plan_path(paths, cycle_id))
+        .ok()?
+        .get("fingerprint")
+        .and_then(Value::as_str)?
+        .to_string();
+    let announced = read_json(&reference_announced_path(paths, cycle_id)).ok();
+    if announced.as_ref().and_then(|value| value.get("fingerprint").and_then(Value::as_str)) == Some(fingerprint.as_str()) {
+        return None;
+    }
+    let lead = read_json(&state_root(paths).join(format!("{cycle_id}-lab-director-hypothesis.json"))).ok();
+    let live_lead = lead.as_ref().is_some_and(|lead| lead.get("status").and_then(Value::as_str) != Some("withdrawn"));
+    if live_lead {
+        return None;
+    }
+    let fetched: Vec<String> = state
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| matches!(item.get("status").and_then(Value::as_str), Some("fetched") | Some("present")))
+        .map(|item| {
+            format!(
+                "{} -> {}",
+                item.get("id").and_then(Value::as_str).unwrap_or("?"),
+                item.get("path").and_then(Value::as_str).unwrap_or("?")
+            )
+        })
+        .collect();
+    let message = format!(
+        "Reference code and checkpoints the SOTA cards name are now on this host: {}. The selection round's feasibility audit struck its candidates for want of the official source and checkpoint for the reproduction anchor; those are present now (see reference_assets in your context, with commits and sizes). The owner has released the slate requirement, so you may select a successor lead yourself. Decide whether one can now be selected and, if so, plan the reproduction anchor first against these local sources; if none can, say precisely what is still missing. Do not restate the earlier refusals: they were reached without these sources.",
+        fetched.join("; ")
+    );
+    Some((fingerprint, message))
+}
+
+/// Ask a director once about the arrived sources. Returns the lane it opened.
+pub(crate) fn announce_reference_assets(paths: &AppPaths, cycle_id: &str) -> Result<Vec<Value>> {
+    let Some((fingerprint, message)) = reference_assets_announcement_due(paths, cycle_id) else {
+        return Ok(Vec::new());
+    };
+    let objective = dispatch_cycle_objective(paths, cycle_id)?;
+    let item = json!({
+        "type": "supervisor_instruction",
+        "payload": {
+            "issue_code": "reference_assets_available",
+            "severity": "process_attention",
+            "message": message,
+        }
+    });
+    let lanes = spawn_supervisor_labdirector_followup(paths, cycle_id, &objective, &item)?;
+    write_json(
+        &reference_announced_path(paths, cycle_id),
+        &json!({"fingerprint": fingerprint, "announced_at": now_iso(), "lanes": lanes.iter().filter_map(|lane| lane.get("lane_id").cloned()).collect::<Vec<_>>()}),
+    )?;
+    Ok(lanes)
+}
+
 /// What is on disk, for the audit and the directors.
 pub(crate) fn reference_assets_summary(paths: &AppPaths, cycle_id: &str) -> Value {
     let root = reference_root(paths);
@@ -283,6 +357,41 @@ mod tests {
             ],
             "{ids:?}"
         );
+    }
+
+    #[test]
+    fn the_director_is_asked_once_when_the_sources_arrive_and_only_without_a_live_lead() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let paths = AppPaths {
+            project_root: temp.path().to_path_buf(),
+            runtime_root: temp.path().join(".research-lab"),
+            data_root: temp.path().join("data"),
+            stats_driver_script: PathBuf::new(),
+            literature_driver_script: PathBuf::new(),
+        };
+        fs::create_dir_all(state_root(&paths)).unwrap();
+        let cycle = "ann";
+        let lead = state_root(&paths).join(format!("{cycle}-lab-director-hypothesis.json"));
+        assert!(reference_assets_announcement_due(&paths, cycle).is_none(), "nothing fetched");
+        write_json(&reference_plan_path(&paths, cycle), &json!({"fingerprint": "fp1", "items": []})).unwrap();
+        write_json(&reference_state_path(&paths, cycle), &json!({"status": "running", "items": []})).unwrap();
+        assert!(reference_assets_announcement_due(&paths, cycle).is_none(), "not complete");
+        write_json(&reference_state_path(&paths, cycle), &json!({"status": "complete", "items": [
+            {"id": "git:real-stanford/diffusion_policy", "status": "fetched", "path": "/r/dp"}]})).unwrap();
+        let (fingerprint, message) = reference_assets_announcement_due(&paths, cycle).expect("due once complete");
+        assert_eq!(fingerprint, "fp1");
+        assert!(message.contains("git:real-stanford/diffusion_policy -> /r/dp"), "{message}");
+        // A live lead is working; it is not interrupted.
+        write_json(&lead, &json!({"status": "active"})).unwrap();
+        assert!(reference_assets_announcement_due(&paths, cycle).is_none());
+        // A withdrawn lead is the case.
+        write_json(&lead, &json!({"status": "withdrawn"})).unwrap();
+        assert!(reference_assets_announcement_due(&paths, cycle).is_some());
+        // Announced for this plan: never again. A new plan is announced afresh.
+        write_json(&reference_announced_path(&paths, cycle), &json!({"fingerprint": "fp1"})).unwrap();
+        assert!(reference_assets_announcement_due(&paths, cycle).is_none());
+        write_json(&reference_plan_path(&paths, cycle), &json!({"fingerprint": "fp2", "items": []})).unwrap();
+        assert!(reference_assets_announcement_due(&paths, cycle).is_some());
     }
 
     #[test]
