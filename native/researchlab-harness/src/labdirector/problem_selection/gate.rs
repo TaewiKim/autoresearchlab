@@ -181,7 +181,9 @@ pub(crate) fn expert_selection_director_context(paths: &AppPaths, cycle_id: &str
         "selected_candidate": selection.as_ref().and_then(|value| value.get("candidate").cloned()).unwrap_or(Value::Null),
         "owner_vetted_candidate_ids": owner_candidate_ids(paths, cycle_id),
         "owner_candidates_markdown_path": owner_candidates_markdown_path(paths, cycle_id),
-        "selection_rule": if engaged {
+        "selection_rule": if OwnerDecision::of_selection(selection.as_ref()) == OwnerDecision::SlateReleased {
+            json!(OwnerDecision::SlateReleased.lead_rule())
+        } else if engaged {
             json!("ENFORCED: no lead is selected until the owner has picked a candidate of the expert-selected slate. Then the lead IS that candidate: set selected_hypothesis.slate_candidate_id to selected_candidate.candidate_id, state its hypothesis (sharpen the wording, never change the claim), copy landscape_open_problem_id and landscape_paper_ids from it, and plan the reproduction anchor first. A later replacement must be another id in owner_vetted_candidate_ids. Anything else is NOT applied; the reason is recorded in field_landscape.last_selection_rejections.")
         } else {
             json!("not engaged for this cycle: the pipeline starts once a valid field landscape and SOTA cards exist and no lead has been chosen")

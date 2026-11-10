@@ -425,7 +425,11 @@ function aggregateGatekeeperReviews({ parsedReviews, expectedRubrics }) {
       reviewList.flatMap((item) => item.required_response_from_lab_director || []),
     ),
     recommended_actions: reviewList.flatMap((item) => item.recommended_actions || []),
-    blocker_adjudications: reviewList.flatMap((item) => item.blocker_adjudications || []),
+    // MEASURED ON cycle-a-20260919, 2026-11-09: a later
+    // supersession and an older uphold coexisted. Decisions are newest first,
+    // independent of rubric order and score smoothing. Keep explicit decisions
+    // from all still-current reviews: a later review's silence cannot revoke one.
+    blocker_adjudications: orderedReviews.flatMap((item) => item.blocker_adjudications || []),
     restart_recommended: reviewList.some((item) => item.restart_recommended === true || item.verdict === "reject"),
   };
 }

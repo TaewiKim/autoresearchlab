@@ -44,6 +44,25 @@ test("the median of three reviews of the same evidence is the score, not the new
   assert.equal(aggregate.reviews[0].lane_id, "g3", "the lane that spoke last keeps the bookkeeping");
 });
 
+test("decision chronology follows the newest speaker while scores still use the median", () => {
+  // MEASURED ON cycle-a-20260919, 2026-11-09: conflicting uphold
+  // and superseded decisions were flattened in rubric order. Score selection
+  // and later silence must not discard an explicit accepted disposition.
+  const blocker = "Novelty: need a broader set of non-trivial hypotheses";
+  const reviews = [review("c1", "clarity", 40), review("c2", "clarity", 60),
+    review("n1", "novelty", 20, { blocker_adjudications: [{ blocker, decision: "uphold" }] }),
+    review("c3", "clarity", 80, { blocker_adjudications: [{ blocker, decision: "superseded" }] })];
+  const aggregate = aggregateGatekeeperReviews({ parsedReviews: reviews, expectedRubrics: ["novelty", "clarity"] });
+  assert.equal(scoreOf(aggregate, "clarity"), 60);
+  assert.equal(aggregate.blocker_adjudications[0].decision, "superseded");
+  reviews.push(review("c4", "clarity", 50));
+  const silent = aggregateGatekeeperReviews({ parsedReviews: reviews, expectedRubrics: ["novelty", "clarity"] });
+  assert.equal(silent.blocker_adjudications[0].decision, "superseded");
+  reviews.push(review("c5", "clarity", 40, { blocker_adjudications: [{ blocker, decision: "uphold" }] }));
+  const reopened = aggregateGatekeeperReviews({ parsedReviews: reviews, expectedRubrics: ["novelty", "clarity"] });
+  assert.equal(reopened.blocker_adjudications[0].decision, "uphold");
+});
+
 test("one low outlier among agreeing reviews does not decide the rubric", () => {
   const reviews = [
     review("g1", "clarity", 76),

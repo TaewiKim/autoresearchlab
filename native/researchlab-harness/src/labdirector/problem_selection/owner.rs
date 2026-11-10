@@ -267,10 +267,22 @@ pub(crate) fn owner_candidate_ids(paths: &AppPaths, cycle_id: &str) -> Vec<Strin
 }
 
 pub(crate) fn recorded_owner_selection(paths: &AppPaths, cycle_id: &str) -> Option<Value> {
-    expert_selection_state(paths, cycle_id)
+    let state = expert_selection_state(paths, cycle_id);
+    state
         .get("owner_selection")
         .filter(|value| value.is_object())
         .cloned()
+        .or_else(|| {
+            // MEASURED ON cycle-a-20260919, 2026-11-09: repeated
+            // withdrawal projections archived the owner's standing release in
+            // spent_round, reopening a checkpoint the owner had already lifted.
+            // Recover only the latest round's release, never an old slate pick.
+            state.pointer("/rounds").and_then(Value::as_array)
+                .and_then(|rounds| rounds.last())
+                .and_then(|round| round.pointer("/spent_round/owner_selection"))
+                .filter(|selection| OwnerDecision::of_selection(Some(selection)) == OwnerDecision::SlateReleased)
+                .cloned()
+        })
 }
 
 fn read_pause(paths: &AppPaths, cycle_id: &str) -> Option<Value> {

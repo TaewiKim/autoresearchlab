@@ -97,6 +97,12 @@ pub(crate) fn reopen_selection_for_withdrawn_lead(paths: &AppPaths, cycle_id: &s
     let Some(selection) = recorded_owner_selection(paths, cycle_id) else {
         return Ok(false);
     };
+    // MEASURED ON cycle-a-20260919, 2026-11-09: updated_at and
+    // generated_by change on every reaffirmation of withdrawal. Neither revokes
+    // the owner's release of the slate requirement; only an owner reselection can.
+    if OwnerDecision::of_selection(Some(&selection)) == OwnerDecision::SlateReleased {
+        return Ok(false);
+    }
     // The withdrawal must come AFTER the owner's choice: it is that choice's lead
     // that failed. A withdrawal older than the choice is what the choice answers --
     // MEASURED 2026-11-09: the owner released the second round and the harness,

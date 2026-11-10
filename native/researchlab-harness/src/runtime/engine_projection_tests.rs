@@ -549,6 +549,92 @@
     }
 
     #[test]
+    fn full_disposition_register_unblocks_measured_chronicle_owner_selection_churn() {
+        // MEASURED ON cycle-a-20260919, 2026-11-09: six Chronicle
+        // evidence lanes finished at owner_selection with a withdrawn lead and
+        // a standing owner release. Director 1906 still requested supersession
+        // synchronization because approval read only the gate's empty subset.
+        let (dir, paths, hypothesis_path) = lead_hold_setup(lead_hold_now_ms() - 60_000);
+        let retired = json!({"status": "withdrawn", "selected_hypothesis": null,
+            "projection_source": "lab_director_lane_result", "requery_decision": "restart",
+            "selected_at_epoch_ms": lead_hold_now_ms() - 60_000,
+            "withdrawn_hypothesis": {"statement": "old allocation claim"}});
+        lead_hold_write(&hypothesis_path, retired.clone());
+        lead_hold_write(&paths.runtime_root.join("state/cycle-test-lead-hold.json"), json!({"lead": retired}));
+        for (kind, value) in [
+            ("field-landscape", json!({"subfields": [{}]})),
+            ("frontier-harvest", json!({"top_k": []})),
+            ("sota-cards", json!({"cards": [{}]})),
+            ("field-beliefs", json!({"beliefs": [{}]})),
+            ("candidate-slate", json!({"candidates": [{}]})),
+            ("expert-panel", json!({"ranking": [{}]})),
+            ("novelty-audit", json!({"audits": [{}]})),
+            ("candidate-feasibility", json!({"assessments": [{}]})),
+            ("expert-selection", json!({"engaged_at": "2026-09-19T12:00:00Z", "round": 3,
+                "rounds": [{"spent_round": {"owner_selection": {"candidate_id": "release",
+                    "decision": "slate_released", "selected_at": "2026-11-09T02:40:34Z"}}}]})),
+        ] {
+            lead_hold_write(&paths.runtime_root.join(format!("state/cycle-test-{kind}.json")), value);
+        }
+        for n in 264..270 {
+            let lane = paths.runtime_root.join(format!("lanes/cycle-test/followup-chronicle-{n}"));
+            lead_hold_write(&lane.join("role-plan.json"), json!({"role": "chronicle",
+                "action_type": "chronicle_evidence_request_followup"}));
+            lead_hold_write(&lane.join("final-status.json"), json!({"status": "completed",
+                "completed_at": crate::core::support::now_iso()}));
+        }
+        let old = "Novelty: need a broader set of non-trivial hypotheses";
+        let gate = json!({"gatekeeper_review_status": "parsed", "score": 20, "gate_passed": false,
+            "rubric": [{"name": "novelty", "score": 20}],
+            "gate_blocker_adjudications": [{"blocker": old, "decision": "superseded"},
+                {"blocker": old, "decision": "uphold"}],
+            "gate_blocker_adjudication_resolution": {"active_blockers": [],
+                "removed_blockers": [], "downgraded_blockers": [], "upheld_blockers": []}});
+        let gate_path = paths.runtime_root.join("state/cycle-test-gate-review.json");
+        lead_hold_write(&gate_path, gate.clone());
+        let snapshot = || {
+            let output = std::process::Command::new("node").arg("-e").arg(r#"
+                const base=process.argv[1], cwd=process.argv[2], cycleId='cycle-test';
+                const m=require(base+'/src/orchestrator/cycle_progress');
+                const summary={objective:'Robot imitation coverage', evidence_readiness:{ready:true},
+                  conclusion_readiness_score:50, approval_readiness_score:50,
+                  conclusion_rubric:[{name:'novelty',score:50,reasons:[
+                    'Novelty: need a broader set of non-trivial hypotheses',
+                    'The registered controlled effects are nonidentified']}]};
+                summary.approval_rubric=summary.conclusion_rubric;
+                const conclusion=require(base+'/src/reporting/conclusion_review')
+                  .buildConclusionReview({cwd,cycleId,researcherView:{summary}}).review;
+                const approval=require(base+'/src/reporting/approval_review')
+                  .buildApprovalReview({cwd,cycleId,researcherView:{summary},conclusionReview:conclusion,staged:true}).review;
+                const progress=m.deriveProgress({cwd,cycleId});
+                console.log(JSON.stringify({conclusion,approval,progress,
+                  findings:m.stallFindings({progress,config:m.supervisorConfig({})})}));
+            "#).arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).arg(dir.path()).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+        };
+        let stuck = snapshot();
+        assert_eq!(stuck["progress"]["current_milestone"], "owner_selection");
+        assert_eq!(stuck["progress"]["waiting_on"], json!(["lead_selected_not_published: lab-director-hypothesis has not been written"]));
+        assert_eq!(stuck["progress"]["lanes_since_milestone"]["by_action_type"]["chronicle_evidence_request_followup"]["total"], 6);
+        let signature = "lane_churn:owner_selection:chronicle_evidence_request_followup";
+        assert!(stuck["findings"].as_array().unwrap().iter().any(|f| f["signature"] == signature));
+        assert!(!stuck["approval"]["approval_rubric"].to_string().contains(old));
+        assert!(stuck["approval"]["approval_rubric"].to_string().contains("nonidentified"));
+        assert_eq!(stuck["conclusion"]["conclusion_rubric"][0]["score"], 20);
+        assert_eq!(stuck["approval"]["approval_gate_passed"], false);
+        // The resolved administrative wait reaches the next Director; only its
+        // authored successor, through the ordinary landscape gate, advances.
+        let contract = test_contract("lab-director", PathBuf::from("task.md"));
+        assert!(project_with_valid_landscape(&paths, &contract,
+            &lead_hold_replacement("a director-authored successor method")).unwrap().is_some());
+        let advanced = snapshot();
+        assert_eq!(advanced["progress"]["current_milestone"], "lead_selected");
+        assert!(!advanced["findings"].as_array().unwrap().iter().any(|f| f["signature"] == signature));
+        assert_eq!(lead_hold_read(&gate_path), gate);
+    }
+
+    #[test]
     fn gate_dispositions_reach_successors_and_release_owner_selection_churn() {
         // MEASURED ON cycle-a-20260919, 2026-11-06: 271 adaptive
         // searches finished at owner_selection. Independent dispositions had

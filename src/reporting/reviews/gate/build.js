@@ -6,6 +6,7 @@ const { assertHarnessSourceCurrent } = require("../../../runtime/source_revision
 const { appendReviewOnce } = require("../../../observability/cycle_logs");
 const { writeJson } = require("../../../shared/json");
 const hypothesisProgress = require("../../hypothesis_progress");
+const { applyGateBlockerAdjudications } = require("../../gate_blocker_dispositions");
 const { applyDirectorClueUpdates } = require("../../research_clues");
 const { runtimeRoot } = require("../../../runtime/native_client");
 const { compactGraph, compactHypotheses, compactValidationGaps } = require("../../../shared/context_compaction");
@@ -130,63 +131,6 @@ function buildGatekeeperNoveltyBlockers(aggregateReview) {
       novelty === null ? "n/a" : novelty
     }, impact=${impact === null ? "n/a" : impact}).${whyText}${altText}`,
   ];
-}
-
-function normalizeBlockerForMatch(value) {
-  return String(value || "")
-    .toLowerCase()
-    // Keep letters and digits in any script; a blocker written in another
-    // language must still normalise to something matchable.
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function blockerTextsMatch(left, right) {
-  const a = normalizeBlockerForMatch(left);
-  const b = normalizeBlockerForMatch(right);
-  if (!a || !b) return false;
-  if (a === b) return true;
-  const minLength = Math.min(a.length, b.length);
-  return minLength >= 24 && (a.includes(b) || b.includes(a));
-}
-
-function applyGateBlockerAdjudications(blockers, adjudications) {
-  const active = [];
-  const removed = [];
-  const downgraded = [];
-  const upheld = [];
-  const decisions = asArray(adjudications)
-    .filter((item) => item && typeof item === "object" && item.blocker)
-    .map((item) => ({
-      ...item,
-      decision: String(item.decision || "").trim().toLowerCase(),
-    }));
-
-  for (const blocker of asArray(blockers)) {
-    const matching = decisions.find((item) => blockerTextsMatch(blocker, item.blocker));
-    if (!matching) {
-      active.push(blocker);
-      continue;
-    }
-    if (["remove", "resolved", "superseded"].includes(matching.decision)) {
-      removed.push({ blocker, adjudication: matching });
-      continue;
-    }
-    if (matching.decision === "downgrade") {
-      downgraded.push({ blocker, adjudication: matching });
-      continue;
-    }
-    upheld.push({ blocker, adjudication: matching });
-    active.push(blocker);
-  }
-
-  return {
-    active_blockers: uniqueStrings(active),
-    removed_blockers: removed,
-    downgraded_blockers: downgraded,
-    upheld_blockers: upheld,
-  };
 }
 
 // Durable hypothesis identity for the progress ledger. The LabDirector rewrites

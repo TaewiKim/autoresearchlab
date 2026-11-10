@@ -92,3 +92,69 @@ test("retiring a reason cannot turn a below-threshold rubric into a gate pass", 
   assert.equal(conclusion.all_rubrics_approved, false);
   assert.equal(conclusion.conclusion_gate_passed, false, "the rubric conjunction still controls the gate");
 });
+
+test("each sink applies the full decision register even when the gate's applied subset is empty", (t) => {
+  // MEASURED ON cycle-a-20260919, 2026-11-09: Director 1906 kept
+  // requesting synchronization after Gatekeeper 2058 superseded the breadth
+  // objection. The gate published that decision but its applied subset was empty;
+  // approval regenerated the same objection and Chronicle had run six times.
+  const f = fixture(t);
+  const { buildGateReview } = require("../src/reporting/gate_review");
+  const { aggregateGatekeeperReviews } = require("../src/reporting/reviews/gate/gatekeeper_reviews");
+  const aggregate = aggregateGatekeeperReviews({ expectedRubrics: ["novelty", "clarity"], parsedReviews: [
+    { focus_rubric: "novelty", source_mtime: 1, verdict: "reject", rubric: [],
+      blocker_adjudications: [{ blocker: retired, decision: "uphold" }] },
+    { focus_rubric: "clarity", source_mtime: 2, verdict: "reject", rubric: [],
+      blocker_adjudications: [{ blocker: retired, decision: "superseded" },
+        { blocker: downgraded, decision: "downgrade" }, { blocker: active, decision: "uphold" }] },
+  ] });
+  f.gate.gate_blocker_adjudications = aggregate.blocker_adjudications;
+  f.gate.gate_blocker_adjudication_resolution = {
+    active_blockers: [active], removed_blockers: [], downgraded_blockers: [], upheld_blockers: [],
+  };
+  f.write("gate-review", f.gate);
+  for (let pass = 0; pass < 3; pass += 1) {
+    const { conclusion, approval } = f.refresh();
+    for (const review of [conclusion, approval]) {
+      const actionable = JSON.stringify([review.conclusion_rubric, review.approval_rubric,
+        review.conclusion_blockers, review.approval_blockers, review.recommended_followup_actions]);
+      assert.ok(!actionable.includes(retired), "a later supersession survives rubric ordering and refresh");
+      assert.ok(!actionable.includes(downgraded));
+      assert.ok(actionable.includes(active));
+    }
+    assert.equal(conclusion.conclusion_gate_passed, false);
+    assert.equal(approval.approval_gate_passed, false);
+    assert.deepEqual(conclusion.conclusion_rubric.map((item) => item.score), [20, 35]);
+    assert.deepEqual(conclusion.raw_conclusion_rubric, f.summary.conclusion_rubric);
+    assert.deepEqual(approval.raw_approval_rubric, f.summary.approval_rubric);
+  }
+  // The gate uses that same resolver when it sees the objection again.
+  const lane = path.join(f.cwd, ".research-lab", "lanes", f.cycleId, "gatekeeper-2058");
+  fs.mkdirSync(lane, { recursive: true });
+  for (const [file, value] of Object.entries({
+    "role-plan.json": { role: "gatekeeper", action_type: "independent_gate_review_followup", target_rubric: "novelty" },
+    "final-status.json": { status: "completed" },
+    "result.json": { extracted_json: { verdict: "reject", reviewer_focus_rubric: "novelty",
+      rubric: f.gate.rubric, blocker_adjudications: aggregate.blocker_adjudications } },
+  })) fs.writeFileSync(path.join(lane, file), JSON.stringify(value));
+  const gate = buildGateReview({ cwd: f.cwd, cycleId: f.cycleId,
+    researcherView: { summary: f.summary }, conclusionReview: { review: {
+      conclusion_gate_passed: false, conclusion_blockers: [retired, active],
+    } }, approvalReview: { review: {} } }).review;
+  assert.ok(!gate.gate_scientific_blockers.includes(retired));
+  assert.ok(gate.gate_scientific_blockers.includes(active));
+  assert.equal(gate.gate_passed, false);
+});
+
+test("published decisions remain bound to the current lead and a later uphold restores an objection", (t) => {
+  const f = fixture(t);
+  f.gate.gate_blocker_adjudications = [{ blocker: retired, decision: "uphold" },
+    { blocker: retired, decision: "superseded" }];
+  f.write("gate-review", f.gate);
+  assert.ok(f.refresh().conclusion.conclusion_blockers.includes(retired));
+  f.write("lab-director-hypothesis", { status: "selected", primary_family: "new-lead",
+    dataset_or_accession: "/data/new-panel/episodes.csv" });
+  f.write("gate-review", { ...f.gate, current_hypothesis_identity: { primary_family: "old-lead", dataset_keys: ["old-panel"] },
+    gate_blocker_adjudications: [{ blocker: retired, decision: "superseded" }] });
+  assert.ok(f.refresh().conclusion.conclusion_blockers.includes(retired));
+});

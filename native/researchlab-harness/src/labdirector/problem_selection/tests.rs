@@ -1359,3 +1359,47 @@ fn a_withdrawn_lead_whose_director_restarted_opens_the_next_round() {
     assert_eq!(expert_selection_state(&paths, cycle)["round"], json!(1));
     assert!(recorded_owner_selection(&paths, cycle).is_some());
 }
+
+#[test]
+fn owner_release_survives_withdrawal_refresh_and_archived_rounds() {
+    // MEASURED ON cycle-a-20260919, 2026-11-09: round 3 had
+    // feasibility but no owner-candidates after two restarts archived the same
+    // 02:40:34 release. A later withdrawn projection must not revoke that word.
+    let temp = TempDir::new().unwrap();
+    let paths = selection_test_paths(temp.path());
+    let cycle = "standing-owner-release";
+    setup_cycle(&paths, cycle);
+    let release = json!({"candidate_id": "release", "decision": "slate_released",
+        "selected_at": "2026-11-09T02:40:34Z", "note": "Director chooses the design"});
+    update_expert_selection_state(&paths, cycle, |state| {
+        state.insert("engaged_at".to_string(), json!(now_iso()));
+        state.insert("round".to_string(), json!(3));
+        state.insert("rounds".to_string(), json!([{"spent_round": {"owner_selection": release}}]));
+    }).unwrap();
+    write_json(&state_root(&paths).join(format!("{cycle}-lab-director-hypothesis.json")), &json!({"status": "withdrawn",
+        "requery_decision": "restart", "generated_by": "director-1896",
+        "updated_at": "2026-11-09T04:23:44Z"})).unwrap();
+    assert!(!owner_candidates_path(&paths, cycle).exists());
+    for _ in 0..2 {
+        assert_eq!(recorded_owner_selection(&paths, cycle), Some(release.clone()));
+        assert_eq!(expert_selection_progress(&paths, cycle).stage, "selected");
+        assert!(!reopen_selection_for_withdrawn_lead(&paths, cycle).unwrap());
+        assert!(dispatch_expert_selection(&paths, cycle).unwrap().is_empty());
+        assert!(lead_expert_selection_rejection_reasons(&paths, cycle, &json!({}), true).is_empty());
+        let context = expert_selection_director_context(&paths, cycle);
+        assert_eq!(context["owner_selection"]["decision"], "slate_released");
+        assert_eq!(context["selection_rule"], OwnerDecision::SlateReleased.lead_rule());
+    }
+    // A current owner choice takes precedence, and an archived pick never lifts
+    // the slate requirement for a later round.
+    update_expert_selection_state(&paths, cycle, |state| {
+        state.insert("owner_selection".to_string(), json!({"candidate_id": "new-pick", "decision": "candidate_picked"}));
+    }).unwrap();
+    assert_eq!(recorded_owner_selection(&paths, cycle).unwrap()["candidate_id"], "new-pick");
+    update_expert_selection_state(&paths, cycle, |state| {
+        state.remove("owner_selection");
+        state.insert("rounds".to_string(), json!([{"spent_round": {"owner_selection": release}},
+            {"spent_round": {"owner_selection": {"candidate_id": "old-pick", "decision": "candidate_picked"}}}]));
+    }).unwrap();
+    assert!(recorded_owner_selection(&paths, cycle).is_none());
+}

@@ -532,6 +532,22 @@ function currentLeadRejections(ctx, limit = 4) {
 //
 // Adding a stage is adding a row. Nothing else in this file knows the names.
 
+// MEASURED ON cycle-a-20260919, 2026-11-09: the owner released
+// the slate, but withdrawal refreshes archived that decision and the observer
+// waited for owner-candidates again. Match recorded_owner_selection/OwnerDecision:
+// the latest spent round's release still stands; a slate pick does not transfer.
+function ownerRelease(ctx) {
+  const state = ctx.read("expert-selection").value;
+  const current = state?.owner_selection;
+  const selection = current && typeof current === "object" && !Array.isArray(current)
+    ? current : state?.rounds?.at(-1)?.spent_round?.owner_selection;
+  if (!selection) return null;
+  if (selection.decision === "slate_released") return selection;
+  if (["candidate_picked", "pending"].includes(selection.decision)) return null;
+  return selection.released === true || String(selection.candidate_id || "").toLowerCase() === "release"
+    ? selection : null;
+}
+
 const MILESTONES = [
   {
     id: "field_landscape",
@@ -601,8 +617,10 @@ const MILESTONES = [
   {
     id: "owner_checkpoint",
     artifact: "owner-candidates",
-    at: ["published_at"],
+    at: (ctx) => parseMs(ownerRelease(ctx)?.selected_at)
+      || artifactMs(ctx.read("owner-candidates"), ["published_at"]),
     reached: (ctx) => {
+      if (ownerRelease(ctx)) return true;
       const owner = ctx.read("owner-candidates").value;
       return Boolean(owner?.published_at) && nonEmpty(owner?.candidates);
     },
@@ -610,10 +628,11 @@ const MILESTONES = [
   {
     id: "owner_selection",
     artifact: "owner-selection",
-    at: ["decided_at", "updated_at"],
+    at: (ctx) => parseMs(ownerRelease(ctx)?.selected_at)
+      || artifactMs(ctx.read("owner-selection"), ["decided_at", "updated_at"]),
     // The owner's pick. This one legitimately waits on a person, which is why
     // WAITING_ON_OWNER below excludes it from the stall triggers.
-    reached: (ctx) => Boolean(ctx.read("owner-selection").value?.candidate_id),
+    reached: (ctx) => Boolean(ownerRelease(ctx) || ctx.read("owner-selection").value?.candidate_id),
     waiting: () => ["owner_checkpoint_open: the owner has not picked a candidate yet"],
   },
   {
