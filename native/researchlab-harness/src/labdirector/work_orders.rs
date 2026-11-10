@@ -770,6 +770,43 @@ pub(crate) fn work_orders_in_flight(paths: &AppPaths, cycle_id: &str) -> bool {
         })
 }
 
+/// MemTotal, MemAvailable and SwapFree of a /proc/meminfo text, in MiB.
+fn meminfo_mib(meminfo: &str) -> Option<(u64, u64, u64)> {
+    let field = |name: &str| {
+        meminfo
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|rest| rest.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+            .map(|kib| kib / 1024)
+    };
+    Some((field("MemTotal:")?, field("MemAvailable:")?, field("SwapFree:").unwrap_or(0)))
+}
+
+/// The machine's memory as the harness measures it, outside any lane.
+///
+/// MEASURED ON cycle-a-20260919, 2026-11-10. Engineer 1257 read 1.65 GB
+/// available while the previous lane's cycle refresh (2.7 GB resident) was still
+/// running, stopped on it, and director 1926 cancelled the order as "exhausted
+/// under the measured memory ceiling". The reading was the harness's own
+/// transient; at rest the same machine had 3.4 GB available. A director sizing or
+/// cancelling work on memory needs the harness's reading and what it includes,
+/// not only one lane's first minute.
+fn host_memory_facts(paths: &AppPaths, cycle_id: &str) -> Value {
+    let Some((total, available, swap_free)) = fs::read_to_string("/proc/meminfo").ok().as_deref().and_then(meminfo_mib) else {
+        return Value::Null;
+    };
+    let refresh_running = paths.runtime_root.join("state").join(format!("{cycle_id}-refresh-cycle.lock")).exists();
+    json!({
+        "measured_at": now_iso(),
+        "measured_by": "the harness, outside any lane sandbox",
+        "mem_total_mib": total,
+        "mem_available_mib": available,
+        "swap_free_mib": swap_free,
+        "cycle_refresh_running_at_measurement": refresh_running,
+        "what_this_includes": "The harness's own processes are inside these numbers. Its cycle refresh takes several GB for about a minute after each lane ends and shows as low mem_available while it runs; a provisioning (engineer) lane is not started until that refresh has finished, so a lane's first reading is no longer taken under it. A memory reading recorded by a lane that started before 2026-11-10T09:20Z may have been taken under it. The machine's total is a limit the owner set.",
+    })
+}
+
 /// The orders as every director lane sees them.
 pub(crate) fn work_orders_director_context(paths: &AppPaths, cycle_id: &str) -> Value {
     let ledger = load_ledger(paths, cycle_id);
@@ -802,6 +839,7 @@ pub(crate) fn work_orders_director_context(paths: &AppPaths, cycle_id: &str) -> 
     json!({
         "standing": standing,
         "recently_closed": closed,
+        "host_memory": host_memory_facts(paths, cycle_id),
         "rule": "A next action you issue is a standing work order: it stays in force until a lane carries it out, however many director lanes run in between. Do not re-issue an order listed under `standing` unless you want its wording replaced; a new order for the same role and type replaces the older one. To withdraw one, add a next action {\"type\": \"cancel_work_order\", \"preferred_role\": \"lab-director\", \"description\": \"<order_id>: why\"}. Returning an empty next_actions list cancels nothing.",
         "capability_route": "When a design needs software, an environment, a loader revision or a checkpoint that is not installed here, that is an order, not a blocker to restate: issue {\"type\": \"capability_provisioning_followup\", \"preferred_role\": \"engineer\", \"description\": \"what must run, at which versions, and the command that would prove it\"}. By owner decision engineer lanes -- and only engineer lanes -- may install open-source packages and fetch released code and models from the approved package indexes, code hosts and model hubs. Requirements an analyst handoff declares as engineer-owned and unavailable are ordered automatically.",
     })
@@ -1031,6 +1069,19 @@ mod tests {
         assert_eq!(lanes_of_order(&order, &taken_by_analyst, &none, true), vec!["a1"]);
         let siblings: BTreeSet<String> = ["analyst".to_string()].into_iter().collect();
         assert!(lanes_of_order(&order, &taken_by_analyst, &siblings, true).is_empty());
+    }
+
+    #[test]
+    fn host_memory_is_read_in_mib() {
+        let meminfo = "MemTotal:        6067616 kB
+MemFree:          166000 kB
+MemAvailable:    3452000 kB
+SwapTotal:       8388608 kB
+SwapFree:        5543000 kB
+";
+        assert_eq!(meminfo_mib(meminfo), Some((5925, 3371, 5413)));
+        assert_eq!(meminfo_mib("MemTotal: 10 kB
+"), None);
     }
 
     #[test]
