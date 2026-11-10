@@ -332,6 +332,50 @@ pub(crate) fn append_completed_labdirector_next_actions(
     Ok(completed_labdirector_methods_handoff_present)
 }
 
+/// Minutes a director that restarted with nothing to do holds off the next one.
+fn idle_director_cooldown_minutes() -> i64 {
+    env::var("RESEARCHLAB_IDLE_DIRECTOR_COOLDOWN_MINUTES")
+        .ok()
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|value| *value >= 0)
+        .unwrap_or(45)
+}
+
+/// Whether another director would only repeat the last one.
+///
+/// MEASURED ON cycle-a-20260919, 2026-11-10: eight directors in fifty
+/// minutes (1914-1921), each `restart` with no next action and no replacement.
+/// The plan re-queued a requery or a gate restart every pass, each director read
+/// the same record and declined the same way, and a scout audit the earlier ones
+/// had asked for was overwritten by the next director's empty list before it
+/// could run. A director that ends `restart` with nothing to dispatch has said
+/// what it has to say; the next one is due when the cooldown has passed (new
+/// evidence has had time to arrive) or when something other than this plan asks.
+pub(crate) fn director_requery_would_repeat_idle_restart(paths: &AppPaths, cycle_id: &str) -> Result<bool> {
+    let cooldown = idle_director_cooldown_minutes();
+    if cooldown == 0 {
+        return Ok(false);
+    }
+    let Some((lane_id, payload)) = completed_labdirector_requery_payloads(paths, cycle_id)?.into_iter().next() else {
+        return Ok(false);
+    };
+    let empty = |key: &str| payload.get(key).and_then(Value::as_array).map(|items| items.is_empty()).unwrap_or(true);
+    let idle_restart = payload.get("requery_decision").and_then(Value::as_str) == Some("restart")
+        && payload.get("decision_status").and_then(Value::as_str) == Some("final")
+        && empty("next_actions")
+        && empty("replacement_hypotheses");
+    if !idle_restart {
+        return Ok(false);
+    }
+    let final_status = lane_root(paths, cycle_id, &lane_id).join("final-status.json");
+    let completed_at = read_json(&final_status)
+        .ok()
+        .and_then(|status| status.get("completed_at").and_then(Value::as_str).map(ToString::to_string))
+        .and_then(|text| DateTime::parse_from_rfc3339(&text).ok())
+        .map(|at| at.with_timezone(&Utc));
+    Ok(completed_at.is_some_and(|at| (Utc::now() - at).num_minutes() < cooldown))
+}
+
 pub(crate) fn pending_labdirector_chronicle_prerequisite(
     paths: &AppPaths,
     cycle_id: &str,

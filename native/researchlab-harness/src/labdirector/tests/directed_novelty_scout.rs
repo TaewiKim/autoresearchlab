@@ -79,3 +79,50 @@ fn a_directors_bounded_novelty_audit_runs_without_a_lead() {
     let anonymous = json!({"type": "novelty_followup", "preferred_role": "scout", "description": instruction});
     assert!(run(&anonymous).is_empty());
 }
+
+// MEASURED ON cycle-a-20260919, 2026-11-10: eight directors in fifty
+// minutes, each `restart` with nothing to dispatch, each queued by the plan's
+// re-queued requery.
+#[test]
+fn a_director_that_restarted_with_nothing_to_do_holds_off_the_next_for_a_while() {
+    let tmp = TempDir::new().unwrap();
+    let paths = build_paths(tmp.path());
+    let cycle = "idle-director";
+    fs::create_dir_all(state_root(&paths)).unwrap();
+    fs::create_dir_all(plans_root(&paths)).unwrap();
+    let lane = "followup-lab-director-9";
+    let dir = lane_root(&paths, cycle, lane);
+    fs::create_dir_all(&dir).unwrap();
+    write_json(&dir.join("lane-contract.json"), &json!({
+        "cycle_id": cycle, "lane_id": lane, "role": "lab-director", "runtime_class": "codex-agent",
+        "mode": "read-write-scoped", "cwd": paths.project_root, "task_file": dir.join("task.md"),
+        "allowed_inputs": [], "allowed_outputs": [], "output_artifact": null, "fallback_strategy": null,
+    })).unwrap();
+    write_json(&dir.join("role-plan.json"), &json!({
+        "lane_id": lane, "role": "lab-director", "action_type": "lab_director_requery_followup",
+    })).unwrap();
+    let write_result = |decision: &str, next_actions: Value| {
+        write_json(&dir.join("result.json"), &json!({"extracted_json": {
+            "requery_decision": decision, "decision_status": "final",
+            "next_actions": next_actions, "replacement_hypotheses": [],
+        }})).unwrap();
+    };
+    let finished = |minutes_ago: i64| {
+        write_json(&dir.join("final-status.json"), &json!({
+            "status": "completed",
+            "completed_at": (Utc::now() - chrono::Duration::minutes(minutes_ago)).to_rfc3339(),
+        })).unwrap();
+    };
+
+    write_result("restart", json!([]));
+    finished(5);
+    assert!(director_requery_would_repeat_idle_restart(&paths, cycle).unwrap(), "just said nothing to do");
+    finished(90);
+    assert!(!director_requery_would_repeat_idle_restart(&paths, cycle).unwrap(), "the cooldown has passed");
+    // A director that asked for work, or chose a different outcome, is not idle.
+    finished(5);
+    write_result("restart", json!([{"type": "novelty_followup", "preferred_role": "scout", "description": "x"}]));
+    assert!(!director_requery_would_repeat_idle_restart(&paths, cycle).unwrap());
+    write_result("defer_for_chronicle", json!([]));
+    assert!(!director_requery_would_repeat_idle_restart(&paths, cycle).unwrap());
+}

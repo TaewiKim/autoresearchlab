@@ -416,6 +416,16 @@ pub fn dispatch_followup_lanes(
         {
             continue;
         }
+        // A director that restarted with nothing to dispatch has said what it has to
+        // say; the plan's re-queued requery would only repeat it. See
+        // director_requery_would_repeat_idle_restart.
+        if matches!(action_type, "lab_director_requery_followup" | "gate_restart_followup")
+            && action.get("preferred_role").and_then(Value::as_str).unwrap_or("lab-director") == "lab-director"
+            && action.get("falsification_replacement_required").and_then(Value::as_bool) != Some(true)
+            && director_requery_would_repeat_idle_restart(paths, cycle_id)?
+        {
+            continue;
+        }
         let direct_analyst_handoff_runner =
             action_type == "methods_followup" && brief_id.starts_with("analyst-handoff");
         let runner_recovery_action = action_type == "lab_director_requery_followup"
