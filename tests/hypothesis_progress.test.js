@@ -326,6 +326,37 @@ function rec({ round, lane, statement, scores, verdict, gatePassed }) {
   });
   assert.strictEqual(reselected.lead, dormant.memory_id);
   pass("a reasoned decline to resume the strongest lead is recorded and not asked again");
+
+  // MEASURED ON cycle-a-20260919, 2026-11-10: 75 declines, each of which
+  // made the next-best dormant lead the one to put. Three in a row end the walk.
+  // (Other leads are declined here, so the dormant one stays the next to put.)
+  const walkRoot = fsx.mkdtempSync(pathx.join(os.tmpdir(), "decline-walk-"));
+  const decline = (laneId, leadId, decision = "decline") => {
+    const dir = pathx.join(walkRoot, "lanes", CYCLE, laneId);
+    fsx.mkdirSync(dir, { recursive: true });
+    fsx.writeFileSync(pathx.join(dir, "result.json"), JSON.stringify({ extracted_json: { resume_lead_decision: {
+      lead_id: leadId, decision, evidence_refs: [],
+      reason: "the nomination carries a truncated statement and no registration to authenticate it against",
+    } } }));
+  };
+  const decided = () => evaluateLeadSupersession({
+    records, cycleId: CYCLE, stallRounds: STALL_ROUNDS, declinedResumes: directorResumeDeclines({ root: walkRoot, cycleId: CYCLE }),
+  });
+  decline("followup-lab-director-11", "hyp:aaaa");
+  decline("followup-lab-director-12", "hyp:bbbb");
+  assert.strictEqual(directorResumeDeclines({ root: walkRoot, cycleId: CYCLE }).declineStreak, 2);
+  assert.strictEqual(decided().reason, "best_lead_dormant_resume_before_replacing", "two in a row: the next lead is still put");
+  decline("followup-lab-director-13", "hyp:cccc");
+  const stopped = decided();
+  assert.strictEqual(stopped.reason, "dormant_resume_declined_repeatedly");
+  assert.strictEqual(stopped.decision, "allow", "the pivot stays permitted; only the nomination stops");
+  assert.strictEqual(stopped.declined_in_a_row, 3);
+  assert.ok(!stopped.resume_lead, "no further lead is put to the director");
+  // A resume is an answer of the other kind and starts the count again.
+  decline("followup-lab-director-14", "hyp:dddd", "resume");
+  assert.strictEqual(directorResumeDeclines({ root: walkRoot, cycleId: CYCLE }).declineStreak, 0);
+  assert.strictEqual(decided().reason, "best_lead_dormant_resume_before_replacing");
+  pass("three declined resumes in a row end the walk down the cycle's history");
 }
 
 // ---- ...unless the ledger already recorded that it was falsified -------------

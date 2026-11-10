@@ -1046,8 +1046,39 @@ function withoutLead(declined, memoryId) {
   return copy;
 }
 
+// How many dormant leads in a row the director must decline before the guard
+// stops putting the next one, and how long those answers stay current.
+//
+// MEASURED ON cycle-a-20260919, 2026-11-10. With the lead withdrawn the
+// guard walked down the cycle's history: each declined lead made the next-best
+// one "the strongest lead this cycle has produced", which was put to a new
+// director, declined for the same reason (the nomination carries a truncated
+// statement and no registration to authenticate it against), and replaced by the
+// next. 75 of the 91 answers since director 1800 were declines; each cost a
+// director lane, most of them a second one to file the bookkeeping, and each
+// overwrote whatever the director before it had planned. A decline is an answer
+// about one lead. Three in a row are an answer about the question.
+const RESUME_DECLINE_STREAK_LIMIT = 3;
+const RESUME_DECLINE_CURRENT_MS = 72 * 3600 * 1000;
+
+function directorLaneOrder(laneId) {
+  const match = /^followup-lab-director-(\d+)$/.exec(String(laneId || ""));
+  return match ? Number(match[1]) : 0;
+}
+
+// Reasoned declines since the last `resume`, newest back, while still current.
+function trailingDeclineStreak(answers, now = Date.now()) {
+  let streak = 0;
+  for (const answer of [...answers].sort((a, b) => b.order - a.order)) {
+    if (!answer.declined || now - answer.answeredMs > RESUME_DECLINE_CURRENT_MS) break;
+    streak += 1;
+  }
+  return streak;
+}
+
 function directorResumeDeclines({ root, cycleId }) {
   const declines = new Map();
+  const answers = [];
   const lanesDir = path.join(root, "lanes", cycleId);
   let entries = [];
   try {
@@ -1068,7 +1099,15 @@ function directorResumeDeclines({ root, cycleId }) {
     const verdict = String(answer.decision || "").trim().toLowerCase();
     const reason = String(answer.reason || "").trim();
     const leadId = normalizedLeadId(answer.lead_id);
-    if (verdict !== "decline" || !leadId || reason.length < MIN_DECLINE_REASON_CHARS) continue;
+    const reasonedDecline = verdict === "decline" && Boolean(leadId) && reason.length >= MIN_DECLINE_REASON_CHARS;
+    if (reasonedDecline || verdict === "resume") {
+      let answeredMs = 0;
+      try {
+        answeredMs = fs.statSync(resultPath).mtimeMs;
+      } catch { /* undated: counts as old */ }
+      answers.push({ order: directorLaneOrder(laneId), declined: reasonedDecline, answeredMs });
+    }
+    if (!reasonedDecline) continue;
     declines.set(leadId, {
       lead_id: leadId,
       lane_id: laneId,
@@ -1076,6 +1115,8 @@ function directorResumeDeclines({ root, cycleId }) {
       evidence_refs: Array.isArray(answer.evidence_refs) ? answer.evidence_refs.slice(0, 10).map(String) : [],
     });
   }
+  // Rides on the map so every existing caller keeps working unchanged.
+  declines.declineStreak = trailingDeclineStreak(answers);
   return declines;
 }
 
@@ -1500,6 +1541,17 @@ function evaluateLeadSupersession({
         lead_statement: leadStatement(lead),
         falsified_at: falsification.first_released_at,
         falsification_releases: falsification.releases,
+      };
+    }
+    // The director has declined several in a row: the next-best dormant lead is
+    // not put. See RESUME_DECLINE_STREAK_LIMIT.
+    const declinedInARow = Number(declinedResumes?.declineStreak || 0);
+    if (declinedInARow >= RESUME_DECLINE_STREAK_LIMIT) {
+      return {
+        decision: "allow",
+        reason: "dormant_resume_declined_repeatedly",
+        lead: lead.memory_id,
+        declined_in_a_row: declinedInARow,
       };
     }
     return {
