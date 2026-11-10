@@ -398,6 +398,10 @@ pub fn run_plan(
             if let Ok(lanes) = announce_reference_assets(paths, cycle_id) {
                 pre_created_followups.extend(lanes);
             }
+            // Ordered work that has been carried out goes back to a director, once.
+            if let Ok(lanes) = announce_work_order_results(paths, cycle_id) {
+                pre_created_followups.extend(lanes);
+            }
             // Then the SOTA deep read: ~10 landscape papers read in full, one
             // card each. See labdirector::sota_cards.
             pre_created_followups.extend(dispatch_sota_deep_read_scout(paths, cycle_id)?);

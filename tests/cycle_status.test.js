@@ -210,7 +210,7 @@ test("the shape a dashboard reads is stable", () => {
   // Ids are the dashboard's keys; renaming one silently moves a panel.
   assert.deepEqual(
     status.checks.map((item) => item.id),
-    ["run", "retrieval", "corpus", "graph", "survey", "lead", "experiments", "gate", "capability", "delivery", "tokens", "clues"],
+    ["run", "plan", "retrieval", "corpus", "graph", "survey", "lead", "experiments", "gate", "capability", "delivery", "tokens", "clues"],
   );
   assert.ok(JSON.parse(JSON.stringify(status)), "the report must survive a JSON round trip");
   fs.rmSync(root, { recursive: true, force: true });
@@ -302,4 +302,35 @@ test("a gate round with rubrics nobody reviewed yet is marked partial and does n
   assert.deepEqual(gate.detail.best_by_rubric, { novelty: 52, technical_quality: 34, reproducibility: 42 });
   assert.equal(gate.detail.best_basis, "whole rounds");
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+// MEASURED ON cycle-a-20260919, 2026-11-10: hours at running 0 with the
+// lead withdrawn, and every check read as it had the day before.
+test("a withdrawn lead with nothing ordered and nothing running is a cycle without a plan", () => {
+  const root = emptyCycle();
+  writeState(root, "lab-director-hypothesis", { status: "withdrawn", selected_hypothesis: null });
+  writeState(root, "cycle-run-state", { updated_at: new Date().toISOString(), lane_counts: { running: 0, pending: 0, completed: 9 } });
+  const plan = (status) => status.checks.find((item) => item.id === "plan");
+  let item = plan(cycleStatus({ root, cycleId: CYCLE }));
+  assert.strictEqual(item.verdict, VERDICT.ATTENTION);
+  assert.match(item.note, /no plan/);
+
+  // An order standing is a plan, whoever issued it and however long ago today.
+  writeState(root, "work-orders", { orders: [
+    { order_id: "wo-1", role: "scout", type: "novelty_followup", status: "standing", done_at: null, issued_by: "d1", issued_at: new Date().toISOString() },
+    { order_id: "wo-0", role: "analyst", type: "methods_followup", status: "superseded", done_at: null, issued_by: "d0", issued_at: new Date().toISOString() },
+  ] });
+  item = plan(cycleStatus({ root, cycleId: CYCLE }));
+  assert.strictEqual(item.verdict, VERDICT.OK);
+  assert.strictEqual(item.detail.in_progress, 1);
+  assert.deepStrictEqual(item.detail.orders.map((order) => order.order_id), ["wo-1"]);
+
+  // One that nobody has carried out in half a day, with nothing running, is not.
+  const old = new Date(Date.now() - 20 * 3600 * 1000).toISOString();
+  writeState(root, "work-orders", { orders: [
+    { order_id: "wo-1", role: "scout", type: "novelty_followup", status: "standing", done_at: null, issued_by: "d1", issued_at: old },
+  ] });
+  item = plan(cycleStatus({ root, cycleId: CYCLE }));
+  assert.strictEqual(item.verdict, VERDICT.ATTENTION);
+  assert.match(item.note, /wo-1/);
 });

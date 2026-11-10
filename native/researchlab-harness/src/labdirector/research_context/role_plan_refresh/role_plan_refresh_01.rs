@@ -112,6 +112,9 @@ pub(crate) fn refresh_role_plan_context_before_launch(
         // The expert-selected candidates, the owner's pick and the slate rule
         // the lead gate applies on top of the landscape's.
         planner_metadata["expert_selection"] = expert_selection_director_context(paths, cycle_id);
+        // The orders still standing from earlier decisions, and how to order an
+        // environment. See labdirector::work_orders.
+        planner_metadata["work_orders"] = work_orders_director_context(paths, cycle_id);
         // "Avoid broad repeated scout searches" is an efficiency rule for a cycle
         // that already knows its field. MEASURED ON cycle-b-20260918: with one
         // 2021 review admitted, lab-director-01 wrote "Do not restart broad

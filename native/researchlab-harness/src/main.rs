@@ -130,6 +130,9 @@ fn run() -> Result<()> {
             let payload = materialize_long_run_plan(&paths, &cycle_id, agent_plan.as_deref())?;
             print_json(&payload)?;
         }
+        Commands::WorkOrders { cycle_id } => {
+            print_json(&crate::labdirector::work_orders::refresh_work_orders(&paths, &cycle_id)?)?;
+        }
         Commands::RunPlan {
             cycle_id,
             max_passes,

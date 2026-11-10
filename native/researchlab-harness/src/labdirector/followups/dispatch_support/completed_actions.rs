@@ -117,7 +117,14 @@ pub(crate) fn append_completed_labdirector_next_actions(
     let completed_source_keys = completed_followup_action_source_keys(paths, cycle_id)?;
     let executable_handoff_waiting_for_runner =
         latest_executable_analyst_handoff_waiting_for_runner(paths, cycle_id)?;
-    for (labdirector_lane_id, payload) in completed_labdirector_requery_payloads(paths, cycle_id)? {
+    // Every director with orders still standing, not only the newest one; see
+    // labdirector::work_orders for what the newest-only reading cost.
+    let standing = standing_work_order_payloads(
+        paths,
+        cycle_id,
+        completed_labdirector_requery_payloads(paths, cycle_id)?,
+    );
+    for (labdirector_lane_id, payload) in standing {
         let Some(next_actions) = payload.get("next_actions").and_then(Value::as_array) else {
             continue;
         };
@@ -156,23 +163,13 @@ pub(crate) fn append_completed_labdirector_next_actions(
                 .get("preferred_role")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            if !matches!(
-                (preferred_role, action_type),
-                ("analyst", "methods_followup")
-                    | ("lab-runner", "methods_followup")
-                    | ("chronicle", "chronicle_evidence_request_followup")
-                    | ("scout", "data_acquisition_followup")
-                    | ("scout", "novelty_followup")
-                    // MEASURED ON cycle-a-20260919, 2026-09-30:
-                    // completed directors repeatedly requested independent
-                    // procedure adjudication, but this allowlist discarded
-                    // both gatekeeper action shapes before dispatch.
-                    | ("gatekeeper", "novelty_followup")
-                    | ("gatekeeper", "gate_restart_followup")
-                    | ("analyst", "impact_followup")
-            ) {
+            if !work_order_dispatchable(preferred_role, action_type) {
                 continue;
             }
+            let from_earlier_director = action
+                .get("work_order_from_earlier_director")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             // MEASURED ON cycle-a-20260919, 2026-10-06: the direct
             // next-action collector bypassed the requery graph's ordering and
             // dispatched Chronicle before its preceding review-bundle action.
@@ -226,8 +223,14 @@ pub(crate) fn append_completed_labdirector_next_actions(
             }
             if action_type == "methods_followup"
                 && matches!(preferred_role, "analyst" | "lab-runner")
+                && !from_earlier_director
             {
                 completed_labdirector_methods_handoff_present = true;
+            }
+            // Carried out already, by whichever role took it: the ledger knows,
+            // where the exact-role key below does not.
+            if action.get("work_order_done").and_then(Value::as_bool) == Some(true) {
+                continue;
             }
             if executable_handoff_waiting_for_runner
                 && action_type == "methods_followup"
@@ -257,6 +260,10 @@ pub(crate) fn append_completed_labdirector_next_actions(
                 continue;
             }
             let mut queued_action = action.clone();
+            if let Some(fields) = queued_action.as_object_mut() {
+                fields.remove("work_order_done");
+                fields.remove("work_order_from_earlier_director");
+            }
             queued_action["brief_id"] = json!(source_brief_id.clone());
             if !selected_or_replacement_hypotheses.is_empty()
                 && queued_action.get("candidate_hypotheses").is_none()

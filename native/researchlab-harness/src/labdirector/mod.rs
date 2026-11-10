@@ -25,6 +25,11 @@ pub(crate) use reference_assets::{
     announce_reference_assets, ensure_reference_assets, reference_assets_plan, reference_assets_running,
     reference_assets_summary, reference_root,
 };
+pub(crate) mod work_orders;
+pub(crate) use work_orders::{
+    announce_work_order_results, append_capability_provisioning_actions,
+    standing_work_order_payloads, work_order_dispatchable, work_orders_director_context, work_orders_in_flight,
+};
 mod sota_cards;
 pub(crate) use sota_cards::{
     dispatch_sota_deep_read_scout, project_sota_cards, sha256_hex, sota_deep_read_scout_protocol,

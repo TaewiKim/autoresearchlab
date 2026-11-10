@@ -172,6 +172,8 @@ pub fn dispatch_followup_lanes(
     inject_latest_executable_analyst_handoff_action(paths, cycle_id, &mut ranked_actions)?;
     let completed_labdirector_methods_handoff_present =
         append_completed_labdirector_next_actions(paths, cycle_id, &mut ranked_actions)?;
+    // What an analyst handoff declared the engineer must provision.
+    append_capability_provisioning_actions(paths, cycle_id, &mut ranked_actions);
     let pending_chronicle_prerequisite =
         pending_labdirector_chronicle_prerequisite(paths, cycle_id)?;
     // MEASURED ON cycle-a-20260919, 2026-10-08: owner_selection had
@@ -422,7 +424,10 @@ pub fn dispatch_followup_lanes(
         if matches!(action_type, "lab_director_requery_followup" | "gate_restart_followup")
             && action.get("preferred_role").and_then(Value::as_str).unwrap_or("lab-director") == "lab-director"
             && action.get("falsification_replacement_required").and_then(Value::as_bool) != Some(true)
-            && director_requery_would_repeat_idle_restart(paths, cycle_id)?
+            && (director_requery_would_repeat_idle_restart(paths, cycle_id)?
+                // Or would decide without the result it ordered: see
+                // work_orders_in_flight.
+                || work_orders_in_flight(paths, cycle_id))
         {
             continue;
         }

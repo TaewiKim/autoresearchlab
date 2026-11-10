@@ -411,9 +411,63 @@ function cluesCheck(root, cycleId) {
   return check("clues", "research clues", VERDICT.OK, research.summarize(register), file, null);
 }
 
+// What the cycle has been told to do next, and whether anything is doing it.
+//
+// MEASURED ON cycle-a-20260919, 2026-11-10: the lead was withdrawn, the
+// one director that had ordered work was overwritten by the next, and the cycle
+// sat for hours at `running: 0` with every other check reading as it had the day
+// before. Nothing on this page said that the cycle had no plan. The work orders
+// are the plan (labdirector::work_orders writes the ledger); a withdrawn lead
+// with nothing ordered and nothing running is the state the owner has to hear
+// about, because only a direction from the owner or a director with new evidence
+// leaves it.
+const STALE_ORDER_HOURS = 12;
+
+function planCheck(root, cycleId) {
+  const file = path.join(root, "state", `${cycleId}-work-orders.json`);
+  const ledger = readJson(file);
+  const lead = readJson(path.join(root, "state", `${cycleId}-lab-director-hypothesis.json`));
+  const run = readJson(path.join(root, "state", `${cycleId}-cycle-run-state.json`));
+  const withdrawn = lead?.status === "withdrawn";
+  const running = Number(run?.lane_counts?.running || 0);
+  const orders = Array.isArray(ledger?.orders) ? ledger.orders : [];
+  const standing = orders.filter((order) => order?.status === "standing");
+  const open = standing.filter((order) => !order.done_at);
+  const carriedOut = standing.filter((order) => order.done_at);
+  if (!ledger && !withdrawn) {
+    return check("plan", "the plan (work orders)", VERDICT.ABSENT, {}, file, "no order has been issued yet");
+  }
+  const hours = (iso) => {
+    const minutes = minutesSince(iso);
+    return minutes === null ? null : Math.round(minutes / 6) / 10;
+  };
+  const oldest = open.map((order) => hours(order.issued_at)).filter((value) => value !== null).sort((a, b) => b - a)[0] ?? null;
+  const detail = {
+    in_progress: open.length,
+    awaiting_director: carriedOut.length,
+    oldest_open_hours: oldest,
+    lead_withdrawn: withdrawn,
+    orders: open.map((order) => ({
+      order_id: order.order_id, role: order.role, type: order.type, issued_by: order.issued_by, issued_at: order.issued_at,
+    })),
+  };
+  if (!open.length && !carriedOut.length && withdrawn && running === 0) {
+    return check("plan", "the plan (work orders)", VERDICT.ATTENTION, detail, file,
+      "the lead is withdrawn and nothing is ordered or running: the cycle has no plan. "
+      + "Give it a direction (researchlab select --note ...) or let it close.");
+  }
+  if (oldest !== null && oldest > STALE_ORDER_HOURS && running === 0) {
+    const stale = detail.orders[0];
+    return check("plan", "the plan (work orders)", VERDICT.ATTENTION, detail, file,
+      `${stale.role} ${stale.type} (${stale.order_id}) has stood ${oldest}h and nothing is running`);
+  }
+  return check("plan", "the plan (work orders)", VERDICT.OK, detail, file, null);
+}
+
 function cycleStatus({ root, cycleId }) {
   const checks = [
     runCheck(root, cycleId),
+    planCheck(root, cycleId),
     retrievalCheck(root, cycleId),
     corpusCheck(root, cycleId),
     graphCheck(root, cycleId),

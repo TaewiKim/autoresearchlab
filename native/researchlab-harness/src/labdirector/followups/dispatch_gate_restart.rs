@@ -216,7 +216,23 @@ pub(crate) fn dispatch_gate_restart_followups(
         }
     }
 
+    // MEASURED ON cycle-a-20260919, 2026-11-10: the analyst lane below
+    // had reached attempt 239. With the lead withdrawn and no candidate on the
+    // action it is told to "synthesize and rank replacement hypotheses" and is
+    // handed none, so it waits on the missing-hypothesis dependency, the cycle sits
+    // for an hour until the stall is noticed, and a director is opened to retire
+    // it -- whose `restart` queues the next one. Director 1922: "this is director
+    // selection work, not an executable analyst handoff". Ranking needs something
+    // to rank; so does the runner's "fresh validation pass on replacement
+    // hypotheses".
+    let lead_has_statement = current_lead_under_review(paths, cycle_id)
+        .get("statement")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.trim().is_empty());
+    let something_to_rank = lead_has_statement || !action_candidate_payload.is_empty();
+
     if created.len() < max_new_lanes
+        && something_to_rank
         && followup_role_available(
             role_availability,
             "analyst",
@@ -297,6 +313,7 @@ pub(crate) fn dispatch_gate_restart_followups(
     }
 
     if created.len() < max_new_lanes
+        && something_to_rank
         && !explicit_hypothesis_gate_failed(paths, cycle_id)?
         && followup_role_available(
             role_availability,

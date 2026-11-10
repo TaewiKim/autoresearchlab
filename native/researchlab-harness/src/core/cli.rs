@@ -69,6 +69,12 @@ pub(crate) enum Commands {
         #[arg(long)]
         agent_plan: Option<PathBuf>,
     },
+    /// The work orders standing in a cycle: what directors ordered and an analyst
+    /// handed to the engineer, and whether each has been carried out.
+    WorkOrders {
+        #[arg(long)]
+        cycle_id: String,
+    },
     RunPlan {
         #[arg(long, default_value = "cycle-longrun-0001")]
         cycle_id: String,

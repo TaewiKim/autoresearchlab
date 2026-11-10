@@ -45,6 +45,10 @@ const HEADLINE = {
   corpus: (d) => `${d.recent_frontier ?? 0} recent + ${d.established_impact ?? 0} citation-backed, ${d.earliest_year ?? "?"}-${d.latest_year ?? "?"}`,
   graph: (d) => Object.entries(d).map(([name, value]) => `${name.split("_")[0]} ${value ? value.nodes : "-"}n/${value ? value.edges : "-"}e`).join("  "),
   survey: (d) => `${d.open_problems ?? 0} problems (${d.open_problems_attributed ?? 0} attributed), ${d.proposed_methods ?? 0} methods, ${d.survey_coverage_gaps ?? 0} stated gaps`,
+  plan: (d) => {
+    const names = (d.orders || []).map((order) => `${order.role} ${order.type}`).join(", ");
+    return `${d.in_progress ?? 0} in progress${names ? ` (${names})` : ""}, ${d.awaiting_director ?? 0} carried out and awaiting the director${d.lead_withdrawn ? "; lead withdrawn" : ""}`;
+  },
   lead: (d) => `${d.primary_family || "none"} — falsification ${d.falsification_conditions}, rivals ${d.rival_mechanisms}, lit edges ${d.supporting_literature_edges}`,
   experiments: (d) => `${d.lanes_with_measured_output ?? 0} of ${d.runner_lanes ?? 0} runner lanes measured something, ${d.distinct_blueprints ?? 0} distinct blueprint(s)`,
   gate: (d) => {
