@@ -1959,6 +1959,13 @@ pub(crate) fn run_codex_agent_lane(
             );
         }
     }
+    // The lane's sandbox cannot see the GPU; the harness runs its GPU jobs. Held
+    // to the end of this function, so it serves for as long as the agent runs.
+    let _gpu_job_broker = if lane_provisions_environment(&contract.role, action_type) {
+        super::gpu_jobs::GpuJobBroker::start(paths, &contract.cycle_id, &contract.lane_id)
+    } else {
+        None
+    };
     let auth = auth_status(paths)?;
     let requested_runtime = agent_runtime();
     let runtime = resolve_agent_runtime(requested_runtime);

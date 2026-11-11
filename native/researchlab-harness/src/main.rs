@@ -130,6 +130,9 @@ fn run() -> Result<()> {
             let payload = materialize_long_run_plan(&paths, &cycle_id, agent_plan.as_deref())?;
             print_json(&payload)?;
         }
+        Commands::GpuJob { cycle_id, lane_id, request } => {
+            print_json(&crate::runtime::gpu_jobs::run_gpu_job_request(&paths, &cycle_id, &lane_id, &request)?)?;
+        }
         Commands::WorkOrders { cycle_id } => {
             print_json(&crate::labdirector::work_orders::refresh_work_orders(&paths, &cycle_id)?)?;
         }

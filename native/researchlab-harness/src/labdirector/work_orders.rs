@@ -807,6 +807,61 @@ fn host_memory_facts(paths: &AppPaths, cycle_id: &str) -> Value {
     })
 }
 
+/// Whether lanes can use the GPU, and how. See runtime::gpu_jobs.
+fn gpu_route_fact() -> Value {
+    match crate::runtime::gpu_jobs::gpu_jobs_unavailable_reason() {
+        None => json!({
+            "available": true,
+            "how": "Engineer lanes run GPU work through the harness's GPU job runner (drivers/gpu/gpu_job.py): the harness executes the job outside the lane's sandbox with the GPU, a read-only filesystem except the lane's own directories, and no network. Order GPU work from an engineer (capability_provisioning_followup, or a simulation order).",
+            "what_a_lane_report_of_no_gpu_means": "A lane's sandbox has no GPU device by construction, so `torch.cuda.is_available() == False` or \"GPU access blocked\" recorded INSIDE a lane says nothing about this machine. Reports of that kind made before 2026-11-10 are sandbox readings, not host facts.",
+        }),
+        Some(reason) => json!({"available": false, "why": reason}),
+    }
+}
+
+fn gpu_route_announced_path(paths: &AppPaths, cycle_id: &str) -> PathBuf {
+    state_root(paths).join(format!("{cycle_id}-gpu-route-announced.json"))
+}
+
+/// Whether a director is owed the news that lanes can now use the GPU.
+///
+/// The same rule as the reference assets (labdirector::reference_assets): a
+/// change in what the director can order is a reason to ask it once, when no
+/// lead is at work, and never a reason to loop it. MEASURED ON
+/// cycle-a-20260919: every candidate that needed a trained or evaluated
+/// policy was weighed against lanes reporting no GPU, and the cycle stood without
+/// a plan when the route was built; nothing else would have told it.
+pub(crate) fn gpu_route_announcement_due(paths: &AppPaths, cycle_id: &str, available: bool) -> bool {
+    if !available || gpu_route_announced_path(paths, cycle_id).exists() {
+        return false;
+    }
+    // A cycle that has not started deciding has nobody to tell yet.
+    let Ok(lead) = read_json(&state_root(paths).join(format!("{cycle_id}-lab-director-hypothesis.json"))) else {
+        return false;
+    };
+    lead.get("status").and_then(Value::as_str) == Some("withdrawn")
+}
+
+pub(crate) fn announce_gpu_route(paths: &AppPaths, cycle_id: &str) -> Result<Vec<Value>> {
+    if !gpu_route_announcement_due(paths, cycle_id, crate::runtime::gpu_jobs::gpu_jobs_available()) {
+        return Ok(Vec::new());
+    }
+    let message = "Lanes on this host can now run GPU work. Until now every lane's sandbox hid the GPU device, so each lane that looked recorded no GPU (\"torch.cuda.is_available() is False\", \"NVML reported GPU access blocked\"); those were readings of the sandbox, not of the machine, which has a GPU. An engineer lane now hands GPU jobs to the harness, which runs them outside the lane's sandbox with the GPU, a read-only filesystem except the lane's own directories, and no network (see work_orders.gpu_route and work_orders.host_memory in your context). Earlier decisions that struck, sized or cancelled work on the absence of a GPU were reached without this. Decide what, if anything, it changes: if work you set aside is now executable, order it (an engineer capability_provisioning_followup can provision, probe the GPU and measure cost first); if nothing changes, say precisely what is still missing.";
+    let objective = dispatch_cycle_objective(paths, cycle_id)?;
+    let item = json!({
+        "type": "supervisor_instruction",
+        "payload": {"issue_code": "gpu_route_available", "severity": "process_attention", "message": message}
+    });
+    let lanes = spawn_supervisor_labdirector_followup(paths, cycle_id, &objective, &item)?;
+    if !lanes.is_empty() {
+        write_json(
+            &gpu_route_announced_path(paths, cycle_id),
+            &json!({"announced_at": now_iso(), "lanes": lanes.iter().filter_map(|lane| lane.get("lane_id").cloned()).collect::<Vec<_>>()}),
+        )?;
+    }
+    Ok(lanes)
+}
+
 /// The orders as every director lane sees them.
 pub(crate) fn work_orders_director_context(paths: &AppPaths, cycle_id: &str) -> Value {
     let ledger = load_ledger(paths, cycle_id);
@@ -840,6 +895,7 @@ pub(crate) fn work_orders_director_context(paths: &AppPaths, cycle_id: &str) -> 
         "standing": standing,
         "recently_closed": closed,
         "host_memory": host_memory_facts(paths, cycle_id),
+        "gpu_route": gpu_route_fact(),
         "rule": "A next action you issue is a standing work order: it stays in force until a lane carries it out, however many director lanes run in between. Do not re-issue an order listed under `standing` unless you want its wording replaced; a new order for the same role and type replaces the older one. To withdraw one, add a next action {\"type\": \"cancel_work_order\", \"preferred_role\": \"lab-director\", \"description\": \"<order_id>: why\"}. Returning an empty next_actions list cancels nothing.",
         "capability_route": "When a design needs software, an environment, a loader revision or a checkpoint that is not installed here, that is an order, not a blocker to restate: issue {\"type\": \"capability_provisioning_followup\", \"preferred_role\": \"engineer\", \"description\": \"what must run, at which versions, and the command that would prove it\"}. By owner decision engineer lanes -- and only engineer lanes -- may install open-source packages and fetch released code and models from the approved package indexes, code hosts and model hubs. Requirements an analyst handoff declares as engineer-owned and unavailable are ordered automatically.",
     })
@@ -1069,6 +1125,21 @@ mod tests {
         assert_eq!(lanes_of_order(&order, &taken_by_analyst, &none, true), vec!["a1"]);
         let siblings: BTreeSet<String> = ["analyst".to_string()].into_iter().collect();
         assert!(lanes_of_order(&order, &taken_by_analyst, &siblings, true).is_empty());
+    }
+
+    #[test]
+    fn the_gpu_route_is_announced_once_and_only_to_a_cycle_without_a_lead() {
+        let (_temp, paths) = fixture();
+        let cycle = "gpu";
+        let lead = state_root(&paths).join(format!("{cycle}-lab-director-hypothesis.json"));
+        assert!(!gpu_route_announcement_due(&paths, cycle, true), "no decision yet: nobody to tell");
+        write_json(&lead, &json!({"status": "active", "selected_hypothesis": {"statement": "a lead at work"}})).unwrap();
+        assert!(!gpu_route_announcement_due(&paths, cycle, true), "a lead at work is not interrupted");
+        write_json(&lead, &json!({"status": "withdrawn"})).unwrap();
+        assert!(gpu_route_announcement_due(&paths, cycle, true));
+        assert!(!gpu_route_announcement_due(&paths, cycle, false), "no route, no news");
+        write_json(&gpu_route_announced_path(&paths, cycle), &json!({"announced_at": now_iso()})).unwrap();
+        assert!(!gpu_route_announcement_due(&paths, cycle, true), "once");
     }
 
     #[test]

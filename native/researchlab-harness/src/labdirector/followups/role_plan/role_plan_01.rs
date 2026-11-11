@@ -175,6 +175,10 @@ pub fn followup_task_markdown(
         lines.push(crate::labdirector::policy::engineer_provisioning_directive(
             cycle_id,
         ));
+        // And how to reach the GPU its sandbox hides, where the host has one.
+        if crate::runtime::gpu_jobs::gpu_jobs_available() {
+            lines.push(crate::labdirector::policy::gpu_job_directive(cycle_id));
+        }
         // An engineer sent to run one of the LabDirector's simulation orders (the
         // brief names it, and the role plan carries it in planner_metadata).
         if source_brief_id.starts_with("simulation-")

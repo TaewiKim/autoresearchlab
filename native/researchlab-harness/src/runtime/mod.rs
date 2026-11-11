@@ -11,6 +11,7 @@ pub(crate) mod codex_prompt;
 mod codex_schema;
 mod docker_scout;
 mod engine;
+pub(crate) mod gpu_jobs;
 mod graph_normalization;
 mod gate_review_binding;
 pub(crate) mod handoff_seal;

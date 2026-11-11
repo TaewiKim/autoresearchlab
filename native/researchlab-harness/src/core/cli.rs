@@ -75,6 +75,17 @@ pub(crate) enum Commands {
         #[arg(long)]
         cycle_id: String,
     },
+    /// Run one GPU job request (<lane>/gpu-jobs/<id>.request.json) in the
+    /// harness's GPU sandbox and print its result. The broker does this for a
+    /// running lane; this is the same code, by hand.
+    GpuJob {
+        #[arg(long)]
+        cycle_id: String,
+        #[arg(long)]
+        lane_id: String,
+        #[arg(long)]
+        request: PathBuf,
+    },
     RunPlan {
         #[arg(long, default_value = "cycle-longrun-0001")]
         cycle_id: String,

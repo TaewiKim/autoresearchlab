@@ -957,6 +957,15 @@ pub(crate) fn engineer_provisioning_directive(cycle_id: &str) -> String {
     )
 }
 
+/// How an engineer lane reaches the GPU. See runtime::gpu_jobs for what was
+/// measured: the lane's sandbox has no GPU device and no setting adds one, so for
+/// seven weeks "no GPU" was recorded as a fact about a machine that has one.
+pub(crate) fn gpu_job_directive(cycle_id: &str) -> String {
+    format!(
+        "- gpu_job_route: this lane's sandbox CANNOT see the GPU -- `torch.cuda.is_available()` is False in it and NVML reports the device blocked, whatever the machine has. That is a property of the sandbox, never a finding about the host, and must not be reported as \"no GPU\". Run GPU work through the harness instead: `python3 drivers/gpu/gpu_job.py --lane-dir .research-lab/lanes/{cycle_id}/<your lane id> --timeout <seconds> [--env KEY=VALUE ...] -- <absolute interpreter> <script> [args...]`. The harness executes the command outside your sandbox and the call returns when it ends, printing the tail of stdout/stderr and a final `GPU_JOB_RESULT {{...}}` line; full logs and `<id>.result.json` are in your lane's `gpu-jobs/` directory. The job has the GPU, the whole filesystem READ-ONLY, write access to your lane directory, `.research-lab/artifacts/{cycle_id}/<your lane id>/` and `.research-lab/datasets/{cycle_id}/`, NO network, and a cleared environment (HF_HUB_OFFLINE=1) plus what you pass with --env. So install packages, clone sources and download checkpoints FIRST, here in the lane, then hand the job an interpreter and files already on disk (the interpreter of the isolated runtime you provisioned is the usual one). Caches under your home directory are read-only inside a job: reading a model already cached works, and a library that must WRITE a cache needs it pointed at your lane (for example `--env HF_HOME=<lane dir>/hf-cache`). Start with a one-line probe (`-- <interpreter> -c \"import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))\"`) and record its output as the capability evidence; measure a small run before sizing a large one, and record device, peak GPU memory and elapsed time. If the client exits 3, no broker is serving this lane: report that sentence, not a missing GPU."
+    )
+}
+
 /// What an engineer lane owes when it is sent to AUDIT how a result was produced.
 ///
 /// Two different reviews sit on one runner result. The analyst asks what the

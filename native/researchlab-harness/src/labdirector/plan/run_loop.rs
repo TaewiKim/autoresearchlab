@@ -398,6 +398,10 @@ pub fn run_plan(
             if let Ok(lanes) = announce_reference_assets(paths, cycle_id) {
                 pre_created_followups.extend(lanes);
             }
+            // Lanes can use the GPU now: a cycle without a lead is told, once.
+            if let Ok(lanes) = announce_gpu_route(paths, cycle_id) {
+                pre_created_followups.extend(lanes);
+            }
             // Ordered work that has been carried out goes back to a director, once.
             if let Ok(lanes) = announce_work_order_results(paths, cycle_id) {
                 pre_created_followups.extend(lanes);
