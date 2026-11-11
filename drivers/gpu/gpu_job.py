@@ -17,8 +17,14 @@ NO network; a cleared environment plus what ``--env`` names. So install and
 download first, in the lane, and hand the job an interpreter and files that are
 already on disk.
 
-Exit code: the job's own; 124 on timeout; 125 if the request was rejected; 3 if
-no broker is serving this lane. The result JSON is printed last, on one line
+The GPU is shared with the owner's other work, which goes first: a job does not
+start while the GPU is in use by something else. It waits (the wait is not counted
+against --timeout) and, if the GPU stays busy, is handed back as ``gpu_busy``
+without having run.
+
+Exit code: the job's own; 124 on timeout; 125 if the request was rejected; 75 if
+the GPU stayed in use by other work and nothing ran; 3 if no broker is serving
+this lane. The result JSON is printed last, on one line
 starting with ``GPU_JOB_RESULT ``.
 
 Standard library only: it has to run under any interpreter a lane has.
@@ -125,8 +131,16 @@ def main(argv: list[str] | None = None) -> int:
             pass
         return 3
 
-    if not wait_for(result_path, args.timeout + 120):
-        print(f"GPU job {job_id} produced no result within {args.timeout + 120}s", file=sys.stderr)
+    # The harness may hold the job while other work uses the GPU; it says for how long.
+    gpu_wait = 0
+    if accepted.exists():
+        try:
+            gpu_wait = int(read_json(accepted).get("max_gpu_wait_seconds") or 0)
+        except (TypeError, ValueError):
+            gpu_wait = 0
+    budget = args.timeout + gpu_wait + 120
+    if not wait_for(result_path, budget):
+        print(f"GPU job {job_id} produced no result within {budget}s", file=sys.stderr)
         return 124
     result = read_json(result_path)
     for stream in ("stdout_tail", "stderr_tail"):
@@ -142,6 +156,8 @@ def main(argv: list[str] | None = None) -> int:
         return 124
     if status == "rejected":
         return 125
+    if status == "gpu_busy":
+        return 75
     code = result.get("exit_code")
     return code if isinstance(code, int) and code != 0 else 1
 

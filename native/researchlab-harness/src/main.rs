@@ -131,7 +131,7 @@ fn run() -> Result<()> {
             print_json(&payload)?;
         }
         Commands::GpuJob { cycle_id, lane_id, request } => {
-            print_json(&crate::runtime::gpu_jobs::run_gpu_job_request(&paths, &cycle_id, &lane_id, &request)?)?;
+            print_json(&crate::runtime::gpu_jobs::run_gpu_job_request(&paths, &cycle_id, &lane_id, &request, None)?)?;
         }
         Commands::WorkOrders { cycle_id } => {
             print_json(&crate::labdirector::work_orders::refresh_work_orders(&paths, &cycle_id)?)?;

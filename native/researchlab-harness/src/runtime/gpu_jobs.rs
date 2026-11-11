@@ -62,6 +62,163 @@ fn max_timeout_seconds() -> u64 {
         .unwrap_or(4 * 3600)
 }
 
+// --- yielding the GPU to other work ---------------------------------------------------
+//
+// OWNER DECISION 2026-11-11: "when other work is using the GPU, lower the
+// priority". The machine is the owner's workstation; the GPU the cycle borrows is
+// the one their other work runs on. A CUDA job has no priority the driver honours,
+// so yielding means two things here: a job does not START while the GPU is in use
+// by something else (it waits, and after a bound says so instead of running), and
+// once started it runs at the lowest CPU and I/O priority.
+//
+// MEASURED in the cycle's container (WSL2, RTX 4060): idle, `nvidia-smi` reports
+// 1-2 % utilisation and ~620 of 8151 MiB in use (the desktop). Per-process usage
+// is not reported under WSL, so "other work" is read from the device totals
+// before the job starts -- which is also why a job already running cannot tell
+// its own load from a newcomer's and is not paused mid-run.
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GpuLoad {
+    utilization_percent: u32,
+    memory_used_mib: u64,
+    memory_total_mib: u64,
+}
+
+fn env_number(name: &str, default: u64) -> u64 {
+    std::env::var(name).ok().and_then(|value| value.trim().parse::<u64>().ok()).unwrap_or(default)
+}
+
+/// Sustained utilisation at or above this is another workload, not the desktop.
+fn busy_utilization_percent() -> u32 {
+    env_number("RESEARCHLAB_GPU_BUSY_UTIL_PERCENT", 20).min(100) as u32
+}
+
+/// Memory in use at or above this share of the card belongs to another workload.
+fn busy_memory_percent() -> u64 {
+    env_number("RESEARCHLAB_GPU_BUSY_MEMORY_PERCENT", 50).min(100)
+}
+
+/// How long a job waits for the GPU before it is handed back as not run.
+fn busy_max_wait() -> Duration {
+    Duration::from_secs(env_number("RESEARCHLAB_GPU_BUSY_MAX_WAIT_SECONDS", 1800))
+}
+
+/// The first GPU's line of `nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total`.
+fn parse_gpu_load(text: &str) -> Option<GpuLoad> {
+    let line = text.lines().find(|line| !line.trim().is_empty())?;
+    let mut fields = line.split(',').map(|field| field.trim().parse::<u64>());
+    let utilization = fields.next()?.ok()?;
+    let used = fields.next()?.ok()?;
+    let total = fields.next()?.ok()?;
+    Some(GpuLoad { utilization_percent: utilization.min(100) as u32, memory_used_mib: used, memory_total_mib: total })
+}
+
+fn sample_gpu_load() -> Option<GpuLoad> {
+    let mut child = Command::new("nvidia-smi")
+        .args(["--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    match child.wait_timeout(Duration::from_secs(10)).ok()? {
+        Some(status) if status.success() => {
+            let mut text = String::new();
+            std::io::Read::read_to_string(child.stdout.as_mut()?, &mut text).ok()?;
+            parse_gpu_load(&text)
+        }
+        Some(_) => None,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            None
+        }
+    }
+}
+
+/// Why these readings mean the GPU is in use by other work, or `None`.
+///
+/// Utilisation must hold across every reading: one spike is a window being
+/// dragged. Memory is a level, so the latest reading decides.
+fn gpu_busy_reason(samples: &[GpuLoad], utilization_limit: u32, memory_limit_percent: u64) -> Option<String> {
+    let latest = samples.last()?;
+    let sustained = samples.iter().map(|sample| sample.utilization_percent).min().unwrap_or(0);
+    if sustained >= utilization_limit {
+        return Some(format!(
+            "the GPU is {sustained}% utilised by other work (limit {utilization_limit}%), {} of {} MiB in use",
+            latest.memory_used_mib, latest.memory_total_mib
+        ));
+    }
+    if latest.memory_total_mib > 0 && latest.memory_used_mib * 100 >= latest.memory_total_mib * memory_limit_percent {
+        return Some(format!(
+            "other work holds {} of {} MiB of GPU memory (limit {memory_limit_percent}%)",
+            latest.memory_used_mib, latest.memory_total_mib
+        ));
+    }
+    None
+}
+
+fn gpu_busy_now() -> (Option<GpuLoad>, Option<String>) {
+    let mut samples = Vec::new();
+    for round in 0..3 {
+        match sample_gpu_load() {
+            Some(sample) => samples.push(sample),
+            // No reading is not a reason to hold a job: the gate needs evidence.
+            None => return (None, None),
+        }
+        if round < 2 {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+    (samples.last().copied(), gpu_busy_reason(&samples, busy_utilization_percent(), busy_memory_percent()))
+}
+
+/// Wait until the GPU is free of other work. `Ok` carries the wait and the last
+/// reading; `Err` the reason it was still busy when the wait ran out or the lane
+/// ended.
+fn wait_for_free_gpu(
+    max_wait: Duration,
+    cancel: Option<&AtomicBool>,
+    mut waiting: impl FnMut(&str, Duration),
+) -> std::result::Result<(Duration, Option<GpuLoad>), String> {
+    let started = Instant::now();
+    loop {
+        let (load, busy) = gpu_busy_now();
+        let Some(reason) = busy else {
+            return Ok((started.elapsed(), load));
+        };
+        if started.elapsed() >= max_wait {
+            return Err(reason);
+        }
+        waiting(&reason, started.elapsed());
+        let pause = Instant::now();
+        while pause.elapsed() < Duration::from_secs(20) {
+            if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                return Err(format!("the lane ended while waiting: {reason}"));
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+}
+
+/// The lowest-priority way to start `program`: idle I/O class, nice 19.
+fn low_priority_command(program: &Path) -> Command {
+    let find = |name: &str| ["/usr/bin", "/bin", "/usr/local/bin"].iter().map(|dir| Path::new(dir).join(name)).find(|path| path.is_file());
+    match (find("ionice"), find("nice")) {
+        (Some(ionice), Some(nice)) => {
+            let mut command = Command::new(ionice);
+            command.args(["-c", "3"]).arg(nice).args(["-n", "19"]).arg(program);
+            command
+        }
+        (None, Some(nice)) => {
+            let mut command = Command::new(nice);
+            command.args(["-n", "19"]).arg(program);
+            command
+        }
+        _ => Command::new(program),
+    }
+}
+
 fn bwrap_path() -> Option<PathBuf> {
     std::env::var("RESEARCHLAB_GPU_JOB_BWRAP")
         .ok()
@@ -259,7 +416,13 @@ fn tail_of(path: &Path, max_bytes: usize) -> String {
 }
 
 /// Run the request at `request_path` and write its result beside it.
-pub(crate) fn run_gpu_job_request(paths: &AppPaths, cycle_id: &str, lane_id: &str, request_path: &Path) -> Result<Value> {
+pub(crate) fn run_gpu_job_request(
+    paths: &AppPaths,
+    cycle_id: &str,
+    lane_id: &str,
+    request_path: &Path,
+    cancel: Option<&AtomicBool>,
+) -> Result<Value> {
     let job_dir = request_path.parent().context("a request file has a directory")?.to_path_buf();
     let id = request_path
         .file_name()
@@ -297,13 +460,33 @@ pub(crate) fn run_gpu_job_request(paths: &AppPaths, cycle_id: &str, lane_id: &st
     let writable = writable_dirs(paths, cycle_id, lane_id);
     let masked = masked_dirs(paths);
     let args = sandbox_args(&paths.project_root, &writable, &masked, &spec.env);
-    write_json(
-        &job_dir.join(format!("{id}.accepted.json")),
-        &json!({"job_id": id, "accepted_at": started_at, "timeout_seconds": spec.timeout_seconds}),
-    )?;
+    let max_wait = busy_max_wait();
+    let accepted_path = job_dir.join(format!("{id}.accepted.json"));
+    let accepted = |state: &str| {
+        let _ = write_json(
+            &accepted_path,
+            &json!({"job_id": id, "accepted_at": started_at, "timeout_seconds": spec.timeout_seconds,
+                    "max_gpu_wait_seconds": max_wait.as_secs(), "state": state}),
+        );
+    };
+    accepted("accepted");
+    // Other work on the GPU goes first.
+    let (gpu_wait, gpu_load) = match wait_for_free_gpu(max_wait, cancel, |reason, waited| {
+        accepted(&format!("waiting {}s for the GPU: {reason}", waited.as_secs()));
+    }) {
+        Ok(ready) => ready,
+        Err(reason) => {
+            return finish(json!({
+                "status": "gpu_busy",
+                "error": format!("not run: {reason}. The GPU is shared with the owner's other work, which has priority; this job waited up to {}s for it. Try again later.", max_wait.as_secs()),
+                "argv": spec.argv,
+            }));
+        }
+    };
+    accepted("running");
 
     let clock = Instant::now();
-    let mut child = match Command::new(&bwrap)
+    let mut child = match low_priority_command(&bwrap)
         .args(&args)
         .args(&spec.argv)
         .stdin(Stdio::null())
@@ -329,6 +512,13 @@ pub(crate) fn run_gpu_job_request(paths: &AppPaths, cycle_id: &str, lane_id: &st
         "exit_code": exit_code,
         "elapsed_seconds": (clock.elapsed().as_millis() as f64) / 1000.0,
         "timeout_seconds": spec.timeout_seconds,
+        "gpu_wait_seconds": gpu_wait.as_secs(),
+        "gpu_before_start": gpu_load.map(|load| json!({
+            "utilization_percent": load.utilization_percent,
+            "memory_used_mib": load.memory_used_mib,
+            "memory_total_mib": load.memory_total_mib,
+        })),
+        "priority": "started only once the GPU was not in use by other work; runs at nice 19 and idle I/O class",
         "argv": spec.argv,
         "env": spec.env,
         "stdout_path": stdout_path,
@@ -395,7 +585,7 @@ impl GpuJobBroker {
                     if flag.load(Ordering::Relaxed) {
                         break;
                     }
-                    if let Err(error) = run_gpu_job_request(&paths, &cycle_id, &lane_id, &request) {
+                    if let Err(error) = run_gpu_job_request(&paths, &cycle_id, &lane_id, &request, Some(flag.as_ref())) {
                         eprintln!("[researchlab-harness] GPU job {} failed to run: {error:#}", request.display());
                         // Never serve the same broken request twice.
                         let id = request.file_name().and_then(|name| name.to_str()).unwrap_or("job").trim_end_matches(".request.json").to_string();
@@ -479,6 +669,40 @@ mod tests {
         assert_eq!(args.last().map(String::as_str), Some("--"), "the job's argv follows");
     }
 
+    // OWNER DECISION 2026-11-11: other work on the GPU goes first.
+    #[test]
+    fn a_gpu_in_use_by_other_work_is_busy_and_an_idle_desktop_is_not() {
+        let load = |utilization_percent, memory_used_mib| GpuLoad { utilization_percent, memory_used_mib, memory_total_mib: 8151 };
+        assert_eq!(parse_gpu_load("2, 624, 8151\n"), Some(load(2, 624)));
+        assert_eq!(parse_gpu_load("\n97, 6100, 8151\n3, 10, 24000\n"), Some(load(97, 6100)), "the first GPU");
+        assert_eq!(parse_gpu_load("[N/A], 624, 8151"), None);
+        assert_eq!(parse_gpu_load(""), None);
+
+        // The measured idle desktop: 1-2 %, ~620 MiB.
+        assert_eq!(gpu_busy_reason(&[load(2, 624), load(1, 618), load(1, 615)], 20, 50), None);
+        // One spike is not a workload ...
+        assert_eq!(gpu_busy_reason(&[load(3, 700), load(85, 700), load(2, 700)], 20, 50), None);
+        // ... sustained use is,
+        let training = gpu_busy_reason(&[load(96, 3000), load(99, 3000), load(97, 3000)], 20, 50).unwrap();
+        assert!(training.contains("96%"), "{training}");
+        // and so is a model another process is holding, even while it idles.
+        let held = gpu_busy_reason(&[load(0, 5200), load(0, 5200), load(0, 5200)], 20, 50).unwrap();
+        assert!(held.contains("5200 of 8151"), "{held}");
+        assert_eq!(gpu_busy_reason(&[], 20, 50), None, "no reading holds nothing");
+    }
+
+    #[test]
+    fn a_job_is_started_at_the_lowest_priority_the_host_offers() {
+        let command = low_priority_command(Path::new("/usr/bin/bwrap"));
+        let line: Vec<String> = std::iter::once(command.get_program().to_string_lossy().to_string())
+            .chain(command.get_args().map(|arg| arg.to_string_lossy().to_string()))
+            .collect();
+        assert_eq!(line.last().map(String::as_str), Some("/usr/bin/bwrap"), "{line:?}");
+        if Path::new("/usr/bin/nice").is_file() {
+            assert!(line.windows(2).any(|pair| pair[0] == "-n" && pair[1] == "19"), "{line:?}");
+        }
+    }
+
     #[test]
     fn a_host_that_cannot_run_gpu_jobs_says_why_in_the_lane() {
         let Some(reason) = gpu_jobs_unavailable_reason() else {
@@ -514,7 +738,7 @@ mod tests {
         let request = job_dir.join("bad.request.json");
         write_json(&request, &json!({"argv": "python train.py"})).unwrap();
         assert_eq!(pending_requests(&job_dir), vec![request.clone()]);
-        let result = run_gpu_job_request(&paths, cycle, lane, &request).unwrap();
+        let result = run_gpu_job_request(&paths, cycle, lane, &request, None).unwrap();
         assert_eq!(result["status"], json!("rejected"));
         assert!(result["error"].as_str().unwrap().contains("argv"));
         assert!(job_dir.join("bad.result.json").is_file());

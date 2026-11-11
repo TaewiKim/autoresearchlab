@@ -60,6 +60,36 @@ def test_the_exit_code_is_the_jobs(tmp_path, capsys):
     assert gpu_job.main(["--lane-dir", str(lane), "--id", "bad", "--", "/no/such/python", "x.py"]) == 125
 
 
+def test_a_gpu_in_use_by_other_work_is_its_own_outcome(tmp_path, capsys):
+    """OWNER DECISION 2026-11-11: other work on the GPU goes first."""
+    lane = tmp_path / "lane"
+    answer(lane / "gpu-jobs", "yield", {"status": "gpu_busy", "error": "not run: the GPU is 97% utilised by other work"})
+    assert gpu_job.main(["--lane-dir", str(lane), "--id", "yield", "--", "/usr/bin/python3", "x.py"]) == 75
+    assert '"status": "gpu_busy"' in capsys.readouterr().out
+
+
+def test_the_client_waits_as_long_as_the_harness_says_it_may_hold_the_job(tmp_path, monkeypatch):
+    lane = tmp_path / "lane"
+    job_dir = lane / "gpu-jobs"
+    job_dir.mkdir(parents=True)
+    waited = {}
+
+    def fake_wait(path, seconds, poll=0.5):
+        waited["seconds"] = seconds
+        return False
+
+    def accept():
+        request = job_dir / "held.request.json"
+        while not request.exists():
+            time.sleep(0.05)
+        (job_dir / "held.accepted.json").write_text(json.dumps({"max_gpu_wait_seconds": 1800}), encoding="utf-8")
+
+    threading.Thread(target=accept, daemon=True).start()
+    monkeypatch.setattr(gpu_job, "wait_for", fake_wait)
+    assert gpu_job.main(["--lane-dir", str(lane), "--id", "held", "--timeout", "600", "--", "/usr/bin/python3", "x.py"]) == 124
+    assert waited["seconds"] == 600 + 1800 + 120
+
+
 def test_no_broker_is_reported_as_no_broker_not_as_no_gpu(tmp_path, capsys):
     lane = tmp_path / "lane"
     code = gpu_job.main(["--lane-dir", str(lane), "--id", "orphan", "--accept-timeout", "1", "--", "/usr/bin/python3", "x.py"])
