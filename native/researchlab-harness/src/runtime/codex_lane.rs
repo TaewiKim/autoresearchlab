@@ -8,8 +8,8 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use super::agent_command::{
-    agent_command, agent_runtime, extract_claude_last_message, researchlab_codex_home,
-    resolve_agent_runtime, AgentRuntime,
+    agent_command, agent_runtime, append_claude_print_args, extract_claude_last_message,
+    researchlab_codex_home, resolve_agent_runtime, AgentRuntime,
 };
 use super::codex_outputs::{
     analyst_handoff_payload, chronicle_required_artifacts_present, extract_codex_last_message,
@@ -1822,21 +1822,7 @@ fn run_chronicle_continuation_attempt(
             );
         }
         AgentRuntime::Claude => {
-            let claude_model = assigned_model.filter(|model| {
-                let lower = model.to_ascii_lowercase();
-                matches!(lower.as_str(), "sonnet" | "opus" | "haiku")
-                    || lower.starts_with("claude-")
-            });
-            builder
-                .arg("-p")
-                .arg("--output-format")
-                .arg("json")
-                .arg("--dangerously-skip-permissions")
-                .args(if let Some(model) = claude_model {
-                    vec!["--model".to_string(), model.to_string()]
-                } else {
-                    Vec::new()
-                });
+            append_claude_print_args(&mut builder, assigned_model, &contract.role);
         }
     }
     apply_cli_environment(&mut builder);
@@ -2110,25 +2096,7 @@ pub(crate) fn run_codex_agent_lane(
             // Claude CLI: -p (print/non-interactive), --output-format json gives
             // a single JSON object with "result" containing the final message.
             // --dangerously-skip-permissions matches the codex bypass behavior.
-            // Only forward --model when the catalog assigned a claude-shaped
-            // model id (alias like "sonnet"/"opus"/"haiku" or a "claude-..." id).
-            // Codex-shaped ids ("gpt-5.x", "codex-...") would be rejected by
-            // claude, so we let the CLI pick its default in that case.
-            let claude_model = assigned_model.filter(|model| {
-                let lower = model.to_ascii_lowercase();
-                matches!(lower.as_str(), "sonnet" | "opus" | "haiku")
-                    || lower.starts_with("claude-")
-            });
-            command_builder
-                .arg("-p")
-                .arg("--output-format")
-                .arg("json")
-                .arg("--dangerously-skip-permissions")
-                .args(if let Some(model) = claude_model {
-                    vec!["--model".to_string(), model.to_string()]
-                } else {
-                    Vec::new()
-                });
+            append_claude_print_args(&mut command_builder, assigned_model, &contract.role);
             // No equivalent of codex --output-last-message; we extract from stdout.
         }
     };
@@ -2378,21 +2346,7 @@ pub(crate) fn run_codex_agent_lane(
                 );
             }
             AgentRuntime::Claude => {
-                let claude_model = retry_model.filter(|model| {
-                    let lower = model.to_ascii_lowercase();
-                    matches!(lower.as_str(), "sonnet" | "opus" | "haiku")
-                        || lower.starts_with("claude-")
-                });
-                retry_builder
-                    .arg("-p")
-                    .arg("--output-format")
-                    .arg("json")
-                    .arg("--dangerously-skip-permissions")
-                    .args(if let Some(model) = claude_model {
-                        vec!["--model".to_string(), model.to_string()]
-                    } else {
-                        Vec::new()
-                    });
+                append_claude_print_args(&mut retry_builder, retry_model, &contract.role);
             }
         }
         let mut retry_stdin_path = retry_prompt_path.clone();
