@@ -204,6 +204,45 @@ pub(crate) fn researchlab_codex_home() -> Option<PathBuf> {
     }
 }
 
+/// The claude model a lane runs on (src/models/catalog.js claudeCatalog: the
+/// director on Opus, every other role on Sonnet).
+const CLAUDE_DIRECTOR_MODEL: &str = "claude-opus-4-7";
+const CLAUDE_LANE_MODEL: &str = "claude-sonnet-4-6";
+
+/// A claude-shaped assignment is kept. Anything else -- a codex tier id, or no
+/// assignment -- used to send no `--model` at all, and so did the catalog's own
+/// full ids ("claude-sonnet-4-6"), which only the bare aliases got past. The
+/// lane then ran on whatever the owner's Claude CLI defaults to, which is its
+/// most capable and most expensive model: on one 11-lane cycle 8 lanes (62% of
+/// the cost) ran that way, among them lanes the router had put on its cheapest
+/// tier. The tier the router chose maps onto the claude catalog instead: its
+/// adjudication tier and the director on Opus, everything else on Sonnet.
+pub(crate) fn claude_model_for(assigned_model: Option<&str>, role: &str) -> String {
+    if let Some(model) = assigned_model.map(str::trim).filter(|model| {
+        let lower = model.to_ascii_lowercase();
+        matches!(lower.as_str(), "sonnet" | "opus" | "haiku") || lower.starts_with("claude-")
+    }) {
+        return model.to_string();
+    }
+    let adjudication = assigned_model.is_some_and(|model| model.to_ascii_lowercase().contains("astra"));
+    if adjudication || role == "lab-director" {
+        return CLAUDE_DIRECTOR_MODEL.to_string();
+    }
+    CLAUDE_LANE_MODEL.to_string()
+}
+
+/// `claude -p` arguments for a lane. One function, because the first launch, the
+/// capacity retry and the chronicle continuation each built their own copy.
+pub(crate) fn append_claude_print_args(builder: &mut Command, assigned_model: Option<&str>, role: &str) {
+    builder
+        .arg("-p")
+        .arg("--output-format")
+        .arg("json")
+        .arg("--dangerously-skip-permissions")
+        .arg("--model")
+        .arg(claude_model_for(assigned_model, role));
+}
+
 pub(crate) fn extract_claude_last_message(stdout: &str) -> String {
     // claude -p --output-format json emits a single JSON object on stdout;
     // accept either {"result": "..."} or {"text": "..."}.
@@ -239,8 +278,8 @@ pub(crate) fn extract_claude_last_message(stdout: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_runtime, command_candidate_is_healthy, resolve_agent_runtime_with_availability,
-        AgentRuntime,
+        agent_runtime, claude_model_for, command_candidate_is_healthy,
+        resolve_agent_runtime_with_availability, AgentRuntime,
     };
     use std::env;
     #[cfg(unix)]
@@ -316,5 +355,16 @@ mod tests {
         fs::set_permissions(&script_path, permissions).unwrap();
 
         assert!(!command_candidate_is_healthy(script_path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn a_codex_tier_or_no_assignment_never_falls_through_to_the_cli_default_model() {
+        assert_eq!(claude_model_for(Some("claude-sonnet-4-6"), "scout"), "claude-sonnet-4-6");
+        assert_eq!(claude_model_for(Some("sonnet"), "scout"), "sonnet");
+        assert_eq!(claude_model_for(Some("gpt-6.1-sol"), "scout"), "claude-sonnet-4-6");
+        assert_eq!(claude_model_for(Some("gpt-6-luna"), "chronicle"), "claude-sonnet-4-6");
+        assert_eq!(claude_model_for(None, "gatekeeper"), "claude-sonnet-4-6");
+        assert_eq!(claude_model_for(Some("gpt-6-astra"), "gatekeeper"), "claude-opus-4-7");
+        assert_eq!(claude_model_for(None, "lab-director"), "claude-opus-4-7");
     }
 }
