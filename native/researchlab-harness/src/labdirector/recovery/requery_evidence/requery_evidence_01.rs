@@ -221,7 +221,13 @@ pub(crate) fn spawn_supervisor_labdirector_followup(
         .get("severity")
         .and_then(Value::as_str)
         .unwrap_or("process_attention");
-    let source_brief_id = format!("supervisor-instruction-{issue_code}");
+    // An instruction that names its `instance` is one piece of news among several
+    // of its kind (a work order's result), and is deduplicated as itself. Without
+    // one, an issue has at most one open lane, as it always had.
+    let source_brief_id = match payload.get("instance").and_then(Value::as_str).map(str::trim).filter(|instance| !instance.is_empty()) {
+        Some(instance) => format!("supervisor-instruction-{issue_code}-{instance}"),
+        None => format!("supervisor-instruction-{issue_code}"),
+    };
     if issue_code == "gate_score_stagnation"
         && gatekeeper_pending_rubric_reviews_exist(paths, cycle_id)?
     {

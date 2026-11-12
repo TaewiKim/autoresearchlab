@@ -901,32 +901,203 @@ pub(crate) fn work_orders_director_context(paths: &AppPaths, cycle_id: &str) -> 
     })
 }
 
+/// When a lane's agent was launched. The invocation record is written at launch,
+/// after the role plan's last refresh, so a director launched after the ledger
+/// recorded an order done has that order, and who carried it out, in its context.
+fn lane_launched_at(lane_dir: &Path) -> Option<DateTime<Utc>> {
+    ["invocation.json", "prompt.txt"]
+        .iter()
+        .find_map(|name| fs::metadata(lane_dir.join(name)).and_then(|meta| meta.modified()).ok())
+        .map(DateTime::<Utc>::from)
+}
+
+fn lane_terminal_status(lane_dir: &Path) -> Option<String> {
+    read_json(&lane_dir.join("final-status.json"))
+        .ok()?
+        .get("status")?
+        .as_str()
+        .filter(|status| matches!(*status, "completed" | "failed" | "aborted"))
+        .map(str::to_string)
+}
+
+fn lane_contract(paths: &AppPaths, cycle_id: &str, lane_id: &str) -> Option<LaneContract> {
+    let value = read_json(&lane_root(paths, cycle_id, lane_id).join("lane-contract.json")).ok()?;
+    serde_json::from_value(value).ok()
+}
+
+/// A lane that will never decide anything: it ended without completing, it is
+/// gone, or the dependency gates hold it on a blocker nothing clears.
+///
+/// The last is the one that matters. Such a lane stays `pending` on disk for
+/// good by design (`DependencyBlocker::is_permanently_closed`), so anything that
+/// asks "is a lane already carrying this?" by status alone is answered yes for
+/// ever by a lane the scheduler has already said it will never run.
+fn lane_will_not_run(paths: &AppPaths, cycle_id: &str, lane_id: &str) -> bool {
+    match lane_terminal_status(&lane_root(paths, cycle_id, lane_id)).as_deref() {
+        Some("completed") => return false,
+        Some(_) => return true,
+        None => {}
+    }
+    if lane_process_is_alive(paths, cycle_id, lane_id) {
+        return false;
+    }
+    let Some(contract) = lane_contract(paths, cycle_id, lane_id) else {
+        return true;
+    };
+    dependency_blocker_for_lane(paths, cycle_id, &contract)
+        .ok()
+        .flatten()
+        .is_some_and(|reason| DependencyBlocker::describe(reason).is_permanently_closed())
+}
+
+/// A director lane that is running, or pending with nothing holding it. It will
+/// be launched after the finished orders were recorded, so it decides with them
+/// in view; a second lane opened beside it would be closed as its duplicate.
+fn director_about_to_decide(paths: &AppPaths, cycle_id: &str) -> Option<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    if let Ok(Some(statuses)) = cached_large_cycle_lane_statuses(paths, cycle_id) {
+        for lane in statuses {
+            let unfinished = matches!(lane.get("status").and_then(Value::as_str), Some("pending" | "prepared" | "running"));
+            if unfinished && lane.get("role").and_then(Value::as_str) == Some("lab-director") {
+                candidates.extend(lane.get("lane_id").and_then(Value::as_str).map(str::to_string));
+            }
+        }
+    } else if let Ok(entries) = fs::read_dir(cycle_lanes_root(paths, cycle_id)) {
+        candidates.extend(entries.flatten().map(|entry| entry.file_name().to_string_lossy().to_string()).filter(|lane_id| lane_id.contains("lab-director")));
+    }
+    candidates.into_iter().find(|lane_id| {
+        if lane_terminal_status(&lane_root(paths, cycle_id, lane_id)).is_some() {
+            return false;
+        }
+        if lane_process_is_alive(paths, cycle_id, lane_id) {
+            return true;
+        }
+        lane_contract(paths, cycle_id, lane_id).is_some_and(|contract| matches!(dependency_blocker_for_lane(paths, cycle_id, &contract), Ok(None)))
+    })
+}
+
+fn lane_list(order: &Value, key: &str) -> Vec<String> {
+    order.get(key).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
+}
+
+/// Carried out (or given up on) and not yet in front of a director.
+fn awaiting_report(order: &Value) -> bool {
+    is_standing(order) && !is_open(order) && order.get("reported_at").map_or(true, Value::is_null)
+}
+
+/// An order is reported when a director who could see its result has decided.
+///
+/// `decided` are completed director lanes with the time each was launched. One
+/// launched after the order was recorded done had it in its context
+/// (`work_orders_director_context` lists it as carried out, with the lanes); so
+/// did the lane the result was announced to, whatever the clocks say.
+fn confirm_reports(ledger: &mut Value, decided: &[(DateTime<Utc>, String)]) -> bool {
+    let mut changed = false;
+    for order in orders_mut(ledger).iter_mut() {
+        if !awaiting_report(order) {
+            continue;
+        }
+        let Some(done_at) = parse_time(order.get("done_at")) else {
+            continue;
+        };
+        let announced = lane_list(order, "announced_to");
+        let Some((_, lane_id)) = decided.iter().find(|(launched_at, lane_id)| *launched_at >= done_at || announced.contains(lane_id)) else {
+            continue;
+        };
+        order["reported_at"] = json!(now_iso());
+        order["reported_to"] = json!([lane_id]);
+        order["report_confirmed"] = json!(true);
+        // Reported work has been handed back; it no longer stands.
+        order["status"] = json!("done");
+        changed = true;
+    }
+    changed
+}
+
+/// Take back a report that was recorded as made to a lane that never ran.
+///
+/// MEASURED ON cycle-a-20260919, 2026-11-11/12. Until then an order was
+/// marked reported the moment a director lane was *created* for it. Director 1939
+/// was created for scout 744's result at 20:27:56Z, in the same pass as director
+/// 1938; 1938 ran first and completed at 20:31:45Z, one second after 1939's role
+/// plan was last refreshed, and the dependency gate closed 1939 for good as
+/// `blocked-by-completed-labdirector-requery`. The ledger said "reported to 1939".
+/// Worse, 1939 stayed `pending`, and the spawn's own duplicate check -- one open
+/// lane per `supervisor-instruction-work_order_results_available` -- found it on
+/// every later pass: scout 746 finished at 00:01Z on the 12th and no director was
+/// opened for it for the next twelve hours (743 `skipped_existing` events).
+fn reopen_undelivered_reports(ledger: &mut Value, completed: &dyn Fn(&str) -> bool, will_not_run: &dyn Fn(&str) -> bool) -> bool {
+    let mut changed = false;
+    for order in orders_mut(ledger).iter_mut() {
+        if text(order, "status") != "done" || order.get("report_confirmed").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let lanes = lane_list(order, "reported_to");
+        if lanes.is_empty() {
+            continue;
+        }
+        if lanes.iter().any(|lane_id| completed(lane_id)) {
+            order["report_confirmed"] = json!(true);
+            changed = true;
+        } else if lanes.iter().all(|lane_id| will_not_run(lane_id)) {
+            order["status"] = json!("standing");
+            order["announced_to"] = json!(lanes);
+            order["reported_at"] = Value::Null;
+            order["reported_to"] = Value::Null;
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Ask one director when ordered work has been carried out and not yet reported.
+///
+/// "Reported" is a fact about a director, not about this function: an order is
+/// reported once a director launched after it was done has completed
+/// (`confirm_reports`). Opening a lane only *announces* it. An announcement whose
+/// lane will never run is made again, to a new lane, up to the attempt cap; one
+/// whose lane is still to run is waited for.
 ///
 /// Waits for the orders still in progress so the director decides once with the
 /// whole result, unless the finished ones have waited `hold_hours` already.
 pub(crate) fn announce_work_order_results(paths: &AppPaths, cycle_id: &str) -> Result<Vec<Value>> {
     let mut ledger = refresh_work_orders(paths, cycle_id)?;
-    let unreported = |order: &Value| is_standing(order) && !is_open(order) && order.get("reported_at").map_or(true, Value::is_null);
-    let finished: Vec<Value> = orders(&ledger).iter().filter(|order| unreported(order)).cloned().collect();
-    if finished.is_empty() {
-        return Ok(Vec::new());
+    let save = |ledger: &mut Value| -> Result<()> {
+        ledger["updated_at"] = json!(now_iso());
+        write_json(&work_orders_path(paths, cycle_id), ledger)
+    };
+    let completed = |lane_id: &str| lane_terminal_status(&lane_root(paths, cycle_id, lane_id)).as_deref() == Some("completed");
+    let will_not_run = |lane_id: &str| lane_will_not_run(paths, cycle_id, lane_id);
+    let mut changed = reopen_undelivered_reports(&mut ledger, &completed, &will_not_run);
+
+    let earliest_done = orders(&ledger).iter().filter(|order| awaiting_report(order)).filter_map(|order| parse_time(order.get("done_at"))).min();
+    if let Some(earliest_done) = earliest_done {
+        let decided: Vec<(DateTime<Utc>, String)> = completed_role_lanes_after(paths, cycle_id, "lab-director", earliest_done)?
+            .into_iter()
+            .filter_map(|(_, lane_id, lane_dir)| lane_launched_at(&lane_dir).map(|launched_at| (launched_at, lane_id)))
+            .collect();
+        changed |= confirm_reports(&mut ledger, &decided);
     }
+    let finished: Vec<Value> = orders(&ledger).iter().filter(|order| awaiting_report(order)).cloned().collect();
+    // An announcement already with a lane that can still run is waited for.
+    let announced_and_waiting = |order: &Value| lane_list(order, "announced_to").iter().any(|lane_id| !will_not_run(lane_id));
+    let attempts = |order: &Value| order.get("announce_attempts").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let to_announce: Vec<Value> = finished.iter().filter(|order| !announced_and_waiting(order) && attempts(order) < max_attempts()).cloned().collect();
     let hold = chrono::Duration::hours(hold_hours());
     let now = Utc::now();
-    let waited_out = finished.iter().any(|order| parse_time(order.get("done_at")).is_some_and(|done| now - done >= hold));
-    if work_orders_in_flight(paths, cycle_id) && !waited_out {
+    let waited_out = to_announce.iter().any(|order| parse_time(order.get("done_at")).is_some_and(|done| now - done >= hold));
+    if to_announce.is_empty()
+        || finished.iter().any(|order| announced_and_waiting(order))
+        || (work_orders_in_flight(paths, cycle_id) && !waited_out)
+        || director_about_to_decide(paths, cycle_id).is_some()
+    {
+        if changed {
+            save(&mut ledger)?;
+        }
         return Ok(Vec::new());
     }
     let describe = |order: &Value| {
-        let lanes: Vec<String> = order
-            .get("done_lanes")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .map(|lane_id| format!(".research-lab/lanes/{cycle_id}/{lane_id}/result.json"))
-            .collect();
+        let lanes: Vec<String> = lane_list(order, "done_lanes").iter().map(|lane_id| format!(".research-lab/lanes/{cycle_id}/{lane_id}/result.json")).collect();
         let outcome = if text(order, "outcome") == "not_carried_out" {
             "COULD NOT BE CARRIED OUT (these lanes ended without completing it; read why before re-issuing it)"
         } else {
@@ -945,30 +1116,36 @@ pub(crate) fn announce_work_order_results(paths: &AppPaths, cycle_id: &str) -> R
     let still_open: Vec<String> = orders(&ledger).iter().filter(|order| is_open(order)).map(|order| format!("[{}] {} {}", text(order, "order_id"), text(order, "role"), text(order, "type"))).collect();
     let message = format!(
         "Work that was ordered has ended and no director has decided with it in view. {}. {}Read the results before deciding: they are the evidence the earlier decisions said was missing. Say what they establish, what they do not, and issue the next orders; an order still standing stays in force without being repeated (see work_orders in your context).",
-        finished.iter().map(describe).collect::<Vec<_>>().join(" | "),
+        to_announce.iter().map(describe).collect::<Vec<_>>().join(" | "),
         if still_open.is_empty() { String::new() } else { format!("Still in progress: {}. ", still_open.join(", ")) }
     );
     let objective = dispatch_cycle_objective(paths, cycle_id)?;
+    // Each announcement is its own piece of news, so each has its own brief: the
+    // ledger decides whether one is owed, not a lane left over from an earlier one.
+    let instance = format!("{}-{}", text(&to_announce[0], "order_id"), attempts(&to_announce[0]) + 1);
     let item = json!({
         "type": "supervisor_instruction",
-        "payload": {"issue_code": "work_order_results_available", "severity": "process_attention", "message": message}
+        "payload": {"issue_code": "work_order_results_available", "instance": instance, "severity": "process_attention", "message": message}
     });
     let lanes = spawn_supervisor_labdirector_followup(paths, cycle_id, &objective, &item)?;
     if lanes.is_empty() {
+        if changed {
+            save(&mut ledger)?;
+        }
         return Ok(lanes);
     }
-    let reported: BTreeSet<String> = finished.iter().map(|order| text(order, "order_id").to_string()).collect();
-    let reported_to: Vec<Value> = lanes.iter().filter_map(|lane| lane.get("lane_id").cloned()).collect();
+    let announced: BTreeSet<String> = to_announce.iter().map(|order| text(order, "order_id").to_string()).collect();
+    let announced_to: Vec<Value> = lanes.iter().filter_map(|lane| lane.get("lane_id").cloned()).collect();
     for order in orders_mut(&mut ledger).iter_mut() {
-        if reported.contains(text(order, "order_id")) {
-            order["reported_at"] = json!(now_iso());
-            order["reported_to"] = json!(reported_to);
-            // Reported work has been handed back; it no longer stands.
-            order["status"] = json!("done");
+        if announced.contains(text(order, "order_id")) {
+            // Announced, not reported: it stands, carried out, until a director decides.
+            let earlier = lane_list(order, "announced_to");
+            order["announced_to"] = json!(earlier.into_iter().map(Value::String).chain(announced_to.iter().cloned()).collect::<Vec<_>>());
+            order["announced_at"] = json!(now_iso());
+            order["announce_attempts"] = json!(attempts(order) + 1);
         }
     }
-    ledger["updated_at"] = json!(now_iso());
-    write_json(&work_orders_path(paths, cycle_id), &ledger)?;
+    save(&mut ledger)?;
     Ok(lanes)
 }
 
@@ -1125,6 +1302,113 @@ mod tests {
         assert_eq!(lanes_of_order(&order, &taken_by_analyst, &none, true), vec!["a1"]);
         let siblings: BTreeSet<String> = ["analyst".to_string()].into_iter().collect();
         assert!(lanes_of_order(&order, &taken_by_analyst, &siblings, true).is_empty());
+    }
+
+    fn carried_out(order_id: &str, done_at: &str) -> Value {
+        json!({"order_id": order_id, "role": "scout", "type": "novelty_followup", "status": "standing", "outcome": "carried_out", "done_at": done_at, "done_lanes": ["followup-scout-746"], "reported_at": null})
+    }
+
+    fn at(iso: &str) -> DateTime<Utc> {
+        parse_time(Some(&json!(iso))).unwrap()
+    }
+
+    // OWNER REPORT 2026-11-12 (a progress check): nothing had run for twelve hours.
+    #[test]
+    fn an_order_is_reported_when_a_director_launched_after_it_was_done_has_decided() {
+        let mut ledger = empty_ledger();
+        orders_mut(&mut ledger).push(carried_out("wo-a", "2026-11-12T00:01:35Z"));
+        // A director already running when the scout finished decided without it.
+        assert!(!confirm_reports(&mut ledger, &[(at("2026-11-11T23:59:00Z"), "followup-lab-director-1".to_string())]));
+        assert!(awaiting_report(&orders(&ledger)[0]));
+        // One launched afterwards had it in its context, whoever asked for that lane.
+        assert!(confirm_reports(&mut ledger, &[(at("2026-11-12T00:05:00Z"), "followup-lab-director-2".to_string())]));
+        let order = &orders(&ledger)[0];
+        assert_eq!(text(order, "status"), "done");
+        assert_eq!(order["reported_to"], json!(["followup-lab-director-2"]));
+        assert_eq!(order["report_confirmed"], json!(true));
+
+        // The lane it was announced to counts whatever the clocks say.
+        let mut announced = carried_out("wo-b", "2026-11-12T00:01:35Z");
+        announced["announced_to"] = json!(["followup-lab-director-3"]);
+        orders_mut(&mut ledger).push(announced);
+        assert!(confirm_reports(&mut ledger, &[(at("2026-11-12T00:01:00Z"), "followup-lab-director-3".to_string())]));
+        assert_eq!(orders(&ledger)[1]["reported_to"], json!(["followup-lab-director-3"]));
+    }
+
+    // Director 1939: recorded as told, closed by the gates as a duplicate, never run.
+    #[test]
+    fn a_report_recorded_to_a_lane_that_never_ran_is_owed_again() {
+        let mut ledger = empty_ledger();
+        let mut told = carried_out("wo-lost", "2026-11-11T20:27:45Z");
+        told["status"] = json!("done");
+        told["reported_at"] = json!("2026-11-11T20:27:56Z");
+        told["reported_to"] = json!(["followup-lab-director-1939"]);
+        let mut delivered = told.clone();
+        delivered["order_id"] = json!("wo-delivered");
+        delivered["reported_to"] = json!(["followup-lab-director-1936"]);
+        let mut pending = told.clone();
+        pending["order_id"] = json!("wo-pending");
+        pending["reported_to"] = json!(["followup-lab-director-2000"]);
+        orders_mut(&mut ledger).extend([told, delivered, pending]);
+
+        let completed = |lane_id: &str| lane_id.ends_with("1936");
+        let will_not_run = |lane_id: &str| lane_id.ends_with("1939");
+        assert!(reopen_undelivered_reports(&mut ledger, &completed, &will_not_run));
+        let by_id = |ledger: &Value, id: &str| orders(ledger).iter().find(|order| text(order, "order_id") == id).cloned().unwrap();
+        let lost = by_id(&ledger, "wo-lost");
+        assert!(awaiting_report(&lost), "{lost}");
+        assert_eq!(lost["announced_to"], json!(["followup-lab-director-1939"]));
+        assert_eq!(by_id(&ledger, "wo-delivered")["report_confirmed"], json!(true));
+        // A lane still to run is neither confirmed nor taken back.
+        let waiting = by_id(&ledger, "wo-pending");
+        assert_eq!(text(&waiting, "status"), "done");
+        assert!(waiting.get("report_confirmed").is_none());
+        // Settled: a second reading changes nothing.
+        assert!(!reopen_undelivered_reports(&mut ledger, &|_| false, &will_not_run));
+
+        // Director 1938 was launched after the scout finished and did decide.
+        assert!(confirm_reports(&mut ledger, &[(at("2026-11-11T20:28:15Z"), "followup-lab-director-1938".to_string())]));
+        assert_eq!(by_id(&ledger, "wo-lost")["reported_to"], json!(["followup-lab-director-1938"]));
+    }
+
+    #[test]
+    fn a_result_is_announced_to_a_new_lane_when_the_last_one_will_not_run() {
+        let (_temp, paths) = fixture();
+        let cycle = "report";
+        let mut ledger = empty_ledger();
+        ledger["watermark"] = json!("2999-01-01T00:00:00Z");
+        ledger["capability_watermark"] = json!("2999-01-01T00:00:00Z");
+        orders_mut(&mut ledger).push(carried_out("wo-2861c14092", &now_iso()));
+        write_json(&work_orders_path(&paths, cycle), &ledger).unwrap();
+        let awaiting = |paths: &AppPaths| load_ledger(paths, cycle)["orders"][0].clone();
+
+        let first = announce_work_order_results(&paths, cycle).unwrap();
+        assert_eq!(first.len(), 1, "{first:?}");
+        let first_lane = first[0]["lane_id"].as_str().unwrap().to_string();
+        let order = awaiting(&paths);
+        assert!(awaiting_report(&order), "announced is not reported: {order}");
+        assert_eq!(order["announced_to"], json!([first_lane]));
+        // The lane is still to run: nothing more is opened beside it.
+        assert!(announce_work_order_results(&paths, cycle).unwrap().is_empty());
+
+        // It ends without deciding. The result is announced again, to a new lane,
+        // although the first lane's brief is still on disk.
+        write_json(&lane_root(&paths, cycle, &first_lane).join("final-status.json"), &json!({"lane_id": first_lane, "status": "aborted", "completed_at": now_iso()})).unwrap();
+        let second = announce_work_order_results(&paths, cycle).unwrap();
+        assert_eq!(second.len(), 1, "{second:?}");
+        let second_lane = second[0]["lane_id"].as_str().unwrap().to_string();
+        assert_ne!(first_lane, second_lane);
+        assert_ne!(first[0]["source_brief_id"], second[0]["source_brief_id"]);
+        assert_eq!(awaiting(&paths)["announce_attempts"], json!(2));
+
+        // That one runs and completes: reported, and nothing further is opened.
+        let second_dir = lane_root(&paths, cycle, &second_lane);
+        fs::write(second_dir.join("invocation.json"), "{}").unwrap();
+        write_json(&second_dir.join("final-status.json"), &json!({"lane_id": second_lane, "status": "completed", "completed_at": (Utc::now() + chrono::Duration::seconds(2)).to_rfc3339()})).unwrap();
+        assert!(announce_work_order_results(&paths, cycle).unwrap().is_empty());
+        let order = awaiting(&paths);
+        assert_eq!(text(&order, "status"), "done", "{order}");
+        assert_eq!(order["reported_to"], json!([second_lane]));
     }
 
     #[test]

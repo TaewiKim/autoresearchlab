@@ -422,6 +422,10 @@ function cluesCheck(root, cycleId) {
 // about, because only a direction from the owner or a director with new evidence
 // leaves it.
 const STALE_ORDER_HOURS = 12;
+// A result nobody is waiting on anything else for reaches a director within one
+// pass. MEASURED ON cycle-a-20260919, 2026-11-12: scout 746's result
+// waited twelve hours while this check read "ok".
+const UNREPORTED_RESULT_HOURS = 1;
 
 function planCheck(root, cycleId) {
   const file = path.join(root, "state", `${cycleId}-work-orders.json`);
@@ -442,10 +446,12 @@ function planCheck(root, cycleId) {
     return minutes === null ? null : Math.round(minutes / 6) / 10;
   };
   const oldest = open.map((order) => hours(order.issued_at)).filter((value) => value !== null).sort((a, b) => b - a)[0] ?? null;
+  const waited = carriedOut.map((order) => hours(order.done_at)).filter((value) => value !== null).sort((a, b) => b - a)[0] ?? null;
   const detail = {
     in_progress: open.length,
     awaiting_director: carriedOut.length,
     oldest_open_hours: oldest,
+    oldest_unreported_hours: waited,
     lead_withdrawn: withdrawn,
     orders: open.map((order) => ({
       order_id: order.order_id, role: order.role, type: order.type, issued_by: order.issued_by, issued_at: order.issued_at,
@@ -455,6 +461,13 @@ function planCheck(root, cycleId) {
     return check("plan", "the plan (work orders)", VERDICT.ATTENTION, detail, file,
       "the lead is withdrawn and nothing is ordered or running: the cycle has no plan. "
       + "Give it a direction (researchlab select --note ...) or let it close.");
+  }
+  if (waited !== null && running === 0
+    && ((!open.length && waited > UNREPORTED_RESULT_HOURS) || waited > STALE_ORDER_HOURS)) {
+    const unread = carriedOut.find((order) => hours(order.done_at) === waited) || carriedOut[0];
+    return check("plan", "the plan (work orders)", VERDICT.ATTENTION, detail, file,
+      `${unread.role} ${unread.type} (${unread.order_id}) was carried out ${waited}h ago and no director has decided with it; `
+      + `announced to: ${(unread.announced_to || []).join(", ") || "nobody"}`);
   }
   if (oldest !== null && oldest > STALE_ORDER_HOURS && running === 0) {
     const stale = detail.orders[0];

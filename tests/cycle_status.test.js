@@ -334,3 +334,33 @@ test("a withdrawn lead with nothing ordered and nothing running is a cycle witho
   assert.strictEqual(item.verdict, VERDICT.ATTENTION);
   assert.match(item.note, /wo-1/);
 });
+
+// MEASURED ON cycle-a-20260919, 2026-11-12: scout 746 had carried out
+// its order twelve hours earlier, the director lane it was recorded as reported to
+// never ran, nothing was running, and this check read "ok".
+test("a result that no director has decided with is not a plan at work", () => {
+  const root = emptyCycle();
+  writeState(root, "lab-director-hypothesis", { status: "withdrawn", selected_hypothesis: null });
+  writeState(root, "cycle-run-state", { updated_at: new Date().toISOString(), lane_counts: { running: 0, pending: 1, completed: 9 } });
+  const plan = () => cycleStatus({ root, cycleId: CYCLE }).checks.find((item) => item.id === "plan");
+  const ago = (hours) => new Date(Date.now() - hours * 3600 * 1000).toISOString();
+  const carriedOut = (doneAt, extra = {}) => ({
+    order_id: "wo-2861c14092", role: "scout", type: "novelty_followup", status: "standing", outcome: "carried_out",
+    issued_by: "d1943", issued_at: ago(13), done_at: doneAt, announced_to: ["followup-lab-director-1939"], ...extra,
+  });
+
+  // Just finished: the director is opened on the next pass.
+  writeState(root, "work-orders", { orders: [carriedOut(ago(0.2))] });
+  assert.strictEqual(plan().verdict, VERDICT.OK);
+
+  writeState(root, "work-orders", { orders: [carriedOut(ago(12))] });
+  let item = plan();
+  assert.strictEqual(item.verdict, VERDICT.ATTENTION);
+  assert.match(item.note, /wo-2861c14092.*no director has decided.*followup-lab-director-1939/);
+  assert.strictEqual(item.detail.oldest_unreported_hours, 12);
+
+  // While another order is still being carried out, the result is held for it.
+  const open = { order_id: "wo-2", role: "engineer", type: "capability_provisioning_followup", status: "standing", done_at: null, issued_by: "d1943", issued_at: ago(3) };
+  writeState(root, "work-orders", { orders: [carriedOut(ago(3)), open] });
+  assert.strictEqual(plan().verdict, VERDICT.OK);
+});
