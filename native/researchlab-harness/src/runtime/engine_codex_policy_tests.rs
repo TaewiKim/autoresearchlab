@@ -304,6 +304,22 @@ fn a_real_usage_limit_is_still_a_quota_failure() {
 }
 
 #[test]
+fn a_claude_usage_limit_is_a_quota_failure() {
+    // A gatekeeper lane of a long claude-runtime cycle: the claude runtime's
+    // result object never says "usage limit", only "5-hour limit".
+    let stdout = concat!(
+        "{\"type\":\"result\",\"is_error\":true,\"api_error_status\":429,",
+        "\"api_error\":\"usage_limit_reached\",",
+        "\"result\":\"You've hit your 5-hour limit · resets 11:40am (Asia/Seoul)\",",
+        "\"usage\":{\"input_tokens\":0}}\n",
+    );
+    assert_eq!(
+        codex_failure_category(stdout, "", "", false),
+        Some("quota_exceeded")
+    );
+}
+
+#[test]
 fn an_agent_reading_about_rate_limits_does_not_fail_the_lane() {
     // The same hole, in the branches beside quota: an agent that greps a source
     // file mentioning rate limits, or a listing whose byte count contains 403,
