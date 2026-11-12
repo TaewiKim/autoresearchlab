@@ -84,6 +84,19 @@ fn codex_idle_limit() -> Option<Duration> {
     (seconds > 0).then(|| Duration::from_secs(seconds))
 }
 
+/// Silence means a stall only for a runtime that streams. `claude -p
+/// --output-format json` prints its one result object when it finishes and
+/// nothing before, so every claude lane that worked past the idle limit was
+/// killed as stalled with its work and its tokens thrown away and no usage
+/// recorded: on one short cycle two scout lanes were killed at
+/// exactly 900 s, both mid-review. The role timeout still bounds them.
+fn idle_limit_for(runtime: AgentRuntime) -> Option<Duration> {
+    match runtime {
+        AgentRuntime::Codex => codex_idle_limit(),
+        AgentRuntime::Claude => None,
+    }
+}
+
 /// A tool call the agent started and has not finished. A long simulation or
 /// build legitimately prints nothing until it returns, so silence then is not a
 /// stall.
@@ -467,7 +480,7 @@ fn wait_for_agent(
     check_windows_setup: bool,
 ) -> Result<ChildWatchOutcome> {
     let started = Instant::now();
-    let idle_limit = codex_idle_limit();
+    let idle_limit = idle_limit_for(agent_runtime());
     let mut last_stdout_len = 0u64;
     let mut last_output_at = Instant::now();
     loop {
@@ -3025,6 +3038,11 @@ pub(crate) fn run_codex_agent_lane(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_claude_lane_is_not_killed_for_printing_nothing_until_it_finishes() {
+        assert!(super::idle_limit_for(super::AgentRuntime::Claude).is_none());
+    }
+
     use super::should_enforce_literature_completion;
 
     #[test]
