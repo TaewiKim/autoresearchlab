@@ -20,6 +20,7 @@ The Docker image sets `RESEARCHLAB_PYTHON` already.
 | `RESEARCHLAB_HOME` | Where your keys file lives | `~/.researchlab` |
 | `RESEARCHLAB_AGENT_RUNTIME` | `codex` or `claude` | `codex` |
 | `RESEARCHLAB_CODEX_SANDBOX` | Codex sandbox for every lane | `workspace-write` |
+| `RESEARCHLAB_CODEX_SERVICE_TIER` | Codex service tier for every lane and for the maintainer: `fast`, `priority` or `default`. Fast mode answers sooner and spends subscription credits faster. Any other value is ignored | unset (Codex's own default) |
 | `RESEARCHLAB_CODEX_APPROVAL_POLICY` | Codex approval policy | `on-request` |
 | `RESEARCHLAB_CODEX_CMD` | Path to the `codex` binary, if it is not on `PATH` | — |
 | `RESEARCHLAB_CLAUDE_CMD` | Path to the `claude` binary, for `--agent-runtime claude` | — |

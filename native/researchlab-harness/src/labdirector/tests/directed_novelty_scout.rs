@@ -198,6 +198,60 @@ fn an_earlier_directors_order_is_still_dispatched_after_a_later_director_says_no
     assert!(!work_orders_in_flight(&paths, cycle));
 }
 
+#[test]
+fn ledger_identity_replaces_plan_summaries_for_every_dispatchable_order() {
+    // MEASURED ON cycle-a-20260919, 2026-11-11: plan text deduplication
+    // discarded the Director's order identity. Exercise the shared boundary for
+    // every allowed role/action, including method routing and cancellation.
+    for (role, action_type) in [
+        ("analyst", "methods_followup"), ("lab-runner", "methods_followup"),
+        ("chronicle", "chronicle_evidence_request_followup"),
+        ("scout", "data_acquisition_followup"), ("scout", "novelty_followup"),
+        ("gatekeeper", "novelty_followup"), ("gatekeeper", "gate_restart_followup"),
+        ("analyst", "impact_followup"), ("engineer", "capability_provisioning_followup"),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let paths = build_paths(tmp.path());
+        let cycle = "canonical-orders";
+        let director = "followup-lab-director-1";
+        let lane = lane_root(&paths, cycle, director);
+        write_codex_contract(&paths.runtime_root, cycle, director);
+        write_json(&lane.join("role-plan.json"), &json!({"role": "lab-director", "action_type": "lab_director_requery_followup"})).unwrap();
+        write_json(&lane.join("final-status.json"), &json!({"status": "completed", "completed_at": now_iso()})).unwrap();
+        write_json(&lane.join("result.json"), &json!({"extracted_json": {
+            "requery_decision": "restart", "decision_status": "final",
+            "next_actions": [{"type": action_type, "preferred_role": role, "description": "carry out the bounded order"}]
+        }})).unwrap();
+        let summary = json!({"brief_id": director, "type": action_type,
+            "preferred_role": role, "description": "carry out the bounded order"});
+        let mut actions = vec![summary.clone()];
+        append_completed_labdirector_next_actions(&paths, cycle, &mut actions).unwrap();
+        assert_eq!(actions.len(), 1, "{role}/{action_type}: {actions:?}");
+        let canonical = actions[0].clone();
+        assert_eq!(canonical["source_lab_director_lane_id"], director);
+        assert_eq!(canonical["brief_id"], format!("labdirector-next-action-{director}"));
+        if role == "analyst" && action_type == "methods_followup" {
+            assert_eq!(canonical["type"], "labdirector_comparator_validation_followup");
+            assert!(canonical["analysis_request"].is_object());
+        }
+        // A duplicate from another reader must not discard identity either.
+        let mut other_summary = canonical.clone();
+        other_summary["brief_id"] = json!("review-summary");
+        other_summary.as_object_mut().unwrap().remove("source_lab_director_lane_id");
+        other_summary.as_object_mut().unwrap().remove("work_order_id");
+        let mut actions = vec![other_summary.clone(), other_summary];
+        append_completed_labdirector_next_actions(&paths, cycle, &mut actions).unwrap();
+        assert_eq!(actions, vec![canonical.clone()]);
+
+        let mut ledger = read_json(&crate::labdirector::work_orders::work_orders_path(&paths, cycle)).unwrap();
+        ledger["orders"][0]["status"] = json!("cancelled");
+        write_json(&crate::labdirector::work_orders::work_orders_path(&paths, cycle), &ledger).unwrap();
+        let mut actions = vec![summary];
+        append_completed_labdirector_next_actions(&paths, cycle, &mut actions).unwrap();
+        assert!(actions.is_empty(), "a cancelled order cannot be revived by a plan summary");
+    }
+}
+
 // The analyst that prepared the reproduction declared three capabilities as the
 // engineer's to provision and nothing opened an engineer.
 #[test]

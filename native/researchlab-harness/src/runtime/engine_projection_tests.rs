@@ -549,6 +549,119 @@
     }
 
     #[test]
+    fn canonical_director_orders_unblock_measured_capability_owner_selection_churn() {
+        // MEASURED ON cycle-a-20260919, 2026-11-11: three engineer
+        // lanes completed at owner_selection. Director 1943 ordered the next
+        // audit, but the graph's anonymous copy displaced its ledger identity;
+        // convergence required a lead before obtaining the audit to select one.
+        use crate::labdirector::*;
+        let (dir, paths, hypothesis_path) = lead_hold_setup(lead_hold_now_ms() - 60_000);
+        lead_hold_write(&hypothesis_path, json!({"status": "withdrawn", "selected_hypothesis": null,
+            "projection_source": "lab_director_lane_result", "requery_decision": "restart",
+            "selected_at_epoch_ms": lead_hold_now_ms() - 60_000}));
+        for (kind, value) in [
+            ("field-landscape", json!({"subfields": [{}]})),
+            ("frontier-harvest", json!({"top_k": []})),
+            ("sota-cards", json!({"cards": [{}]})),
+            ("field-beliefs", json!({"beliefs": [{}]})),
+            ("candidate-slate", json!({"candidates": [{}]})),
+            ("expert-panel", json!({"ranking": [{}]})),
+            ("novelty-audit", json!({"audits": [{}]})),
+            ("candidate-feasibility", json!({"assessments": [{}]})),
+            ("expert-selection", json!({"engaged_at": "2026-09-19T12:00:00Z",
+                "rounds": [{"spent_round": {"owner_selection": {
+                    "candidate_id": "release", "decision": "slate_released"}}}]})),
+        ] {
+            lead_hold_write(&paths.runtime_root.join(format!("state/cycle-test-{kind}.json")), value);
+        }
+        for n in [1256, 1259, 1260] {
+            let lane = paths.runtime_root.join(format!("lanes/cycle-test/followup-engineer-{n}"));
+            lead_hold_write(&lane.join("role-plan.json"), json!({"role": "engineer",
+                "action_type": "capability_provisioning_followup"}));
+            lead_hold_write(&lane.join("final-status.json"), json!({"status": "completed",
+                "completed_at": crate::core::support::now_iso()}));
+        }
+        let progress = || {
+            let output = std::process::Command::new("node")
+                .arg("-e").arg("const m=require(process.argv[1]); const p=m.deriveProgress({cwd:process.argv[2],cycleId:'cycle-test'}); console.log(JSON.stringify({progress:p,findings:m.stallFindings({progress:p,config:m.supervisorConfig({})})}));")
+                .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../src/orchestrator/cycle_progress.js"))
+                .arg(dir.path()).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+        };
+        let stuck = progress();
+        let signature = "lane_churn:owner_selection:capability_provisioning_followup";
+        assert_eq!(stuck["progress"]["current_milestone"], "owner_selection");
+        assert_eq!(stuck["progress"]["waiting_on"], json!(["lead_selected_not_published: lab-director-hypothesis has not been written"]));
+        assert_eq!(stuck["progress"]["lanes_since_milestone"]["by_action_type"]["capability_provisioning_followup"]["total"], 3);
+        assert!(stuck["findings"].as_array().unwrap().iter().any(|f| f["signature"] == signature));
+
+        let director = "followup-lab-director-1943";
+        let lane = paths.runtime_root.join(format!("lanes/cycle-test/{director}"));
+        let instruction = "One bounded offline procedure audit using the completed capability receipt; return a terminal disposition. No live retrieval or experiments.";
+        lead_hold_write(&lane.join("lane-contract.json"), serde_json::to_value(test_contract("lab-director", PathBuf::from("task.md"))).unwrap());
+        lead_hold_write(&lane.join("role-plan.json"), json!({"role": "lab-director",
+            "action_type": "lab_director_requery_followup"}));
+        lead_hold_write(&lane.join("result.json"), json!({"extracted_json": {
+            "requery_decision": "restart", "decision_status": "final", "selected_hypothesis": null,
+            "next_actions": [{"type": "novelty_followup", "preferred_role": "scout", "description": instruction}]
+        }}));
+        lead_hold_write(&lane.join("final-status.json"), json!({"status": "completed", "completed_at": crate::core::support::now_iso()}));
+        let collect = || {
+            let mut actions = Vec::new();
+            collect_labdirector_requery_actions(&paths, "cycle-test", &mut actions, &mut std::collections::HashMap::new()).unwrap();
+            append_completed_labdirector_next_actions(&paths, "cycle-test", &mut actions).unwrap();
+            actions
+        };
+        let actions = collect();
+        let audit = actions.iter().find(|a| a["type"] == "novelty_followup").unwrap();
+        assert_eq!(audit["source_lab_director_lane_id"], director);
+        assert_eq!(audit["brief_id"], format!("labdirector-next-action-{director}"));
+        assert!(audit["work_order_id"].as_str().is_some());
+        assert_eq!(audit["description"], instruction);
+
+        let counts = std::collections::HashMap::new();
+        let budget = std::collections::HashMap::new();
+        let availability = FollowupRoleAvailabilityContext {
+            external_validation_required: false, gate_independence_required: false,
+            data_acquisition_query_blocked: false, has_pending_data_acquisition_action: true,
+            existing_followup_counts: &counts, existing_action_counts: &counts, open_action_counts: &counts,
+            existing_total_followups: 3, total_followup_cap: 1000, pass_budget_by_role: &budget,
+            document_stage_authorized: false, latest_handoff_served: None,
+        };
+        let empty = json!({});
+        let ctx = DispatchPlanContext {
+            objective: "Does demonstration coverage explain architecture gains?", convergence_mode: "converge",
+            candidate_hypotheses: &[], schema_quality: &empty, reasoning_graph: &empty, data_graph: &empty,
+            open_validation_gaps: &[],
+        };
+        let mut created = Vec::new();
+        dispatch_novelty_followups(&paths, "cycle-test", 1, &ctx, &availability, &counts,
+            audit, "novelty_followup", audit["brief_id"].as_str().unwrap(), instruction, "novelty", true,
+            &[], &[], &[], &mut created, &mut std::collections::HashSet::new(),
+            &mut std::collections::HashMap::new(), &mut std::collections::HashMap::new()).unwrap();
+        assert_eq!(created.len(), 1, "the ordered audit must execute before a lead exists");
+        let scout = paths.runtime_root.join("lanes/cycle-test").join(created[0]["lane_id"].as_str().unwrap());
+        let plan = lead_hold_read(&scout.join("role-plan.json"));
+        assert_eq!(plan["planner_metadata"]["novelty_mode"], "director-directed-audit");
+        assert_eq!(plan["source_brief_id"], audit["brief_id"]);
+        assert!(std::fs::read_to_string(scout.join("task.md")).unwrap().contains(instruction));
+        lead_hold_write(&scout.join("result.json"), json!({"extracted_json": {"verdict": "unverified"}}));
+        lead_hold_write(&scout.join("final-status.json"), json!({"status": "completed", "completed_at": crate::core::support::now_iso()}));
+        assert!(!collect().iter().any(|a| a["type"] == "novelty_followup"), "the summary cannot resurrect a completed order");
+        assert!(!work_orders_in_flight(&paths, "cycle-test"));
+        // Capability success and audit completion do not select a lead or clear
+        // scientific gates. Only a later Director's admissible decision does.
+        assert_eq!(progress()["progress"]["current_milestone"], "owner_selection");
+        let contract = test_contract("lab-director", PathBuf::from("task.md"));
+        assert!(project_with_valid_landscape(&paths, &contract,
+            &lead_hold_replacement("a director-authored successor method")).unwrap().is_some());
+        let advanced = progress();
+        assert_eq!(advanced["progress"]["current_milestone"], "lead_selected");
+        assert!(!advanced["findings"].as_array().unwrap().iter().any(|f| f["signature"] == signature));
+    }
+
+    #[test]
     fn full_disposition_register_unblocks_measured_chronicle_owner_selection_churn() {
         // MEASURED ON cycle-a-20260919, 2026-11-09: six Chronicle
         // evidence lanes finished at owner_selection with a withdrawn lead and

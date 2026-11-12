@@ -41,6 +41,7 @@
 // and it has no gate, commit, rebuild or resume path.
 
 const crypto = require("crypto");
+const { codexServiceTierArgs } = require("../policy/codex_service_tier");
 const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
@@ -1492,6 +1493,7 @@ function codexArgs({ model, lastMessagePath, schemaPath, cwd }) {
     "--ephemeral",
     "--model", model,
     "--config", 'model_reasoning_effort="high"',
+    ...codexServiceTierArgs(),
     // Ephemeral runs cannot attach child agents (codex_lane.rs).
     "--disable", "multi_agent",
     "--disable", "multi_agent_v2",

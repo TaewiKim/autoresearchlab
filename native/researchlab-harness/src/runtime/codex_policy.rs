@@ -520,9 +520,49 @@ pub(crate) fn parse_codex_config_overrides(raw: Option<&str>) -> Vec<String> {
     overrides
 }
 
+/// The Codex service tier every lane asks for, as a config override.
+///
+/// OWNER DECISION 2026-11-12: run Codex in fast mode. MEASURED the same day in the
+/// cycle's container (codex-cli 0.166.0): nothing set a tier, so every lane ran
+/// with the `service_tier = "default"` of the container's own config; `fast` and
+/// `priority` are accepted for all four models the lanes use (gpt-6-astra,
+/// gpt-6.1-terra, gpt-6.1-sol, gpt-6-luna), `flex` is refused by the API with a
+/// 400 that fails the turn, and an unknown name is dropped by the CLI with an
+/// error item in the lane's stream. So only the names known to work are passed.
+/// Fast mode spends the subscription's credits faster; that is the owner's trade.
+pub(crate) fn codex_service_tier_override(raw: Option<&str>) -> Option<String> {
+    match raw.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+        Some(tier @ ("fast" | "priority" | "default")) => Some(format!("service_tier=\"{tier}\"")),
+        _ => None,
+    }
+}
+
 pub(crate) fn codex_config_overrides() -> Vec<String> {
     let raw = env::var("RESEARCHLAB_CODEX_CONFIG_OVERRIDES").ok();
-    parse_codex_config_overrides(raw.as_deref())
+    let mut overrides = parse_codex_config_overrides(raw.as_deref());
+    // An explicit override in the general list wins over the named setting.
+    if !overrides.iter().any(|item| item.trim_start().starts_with("service_tier")) {
+        let tier = env::var("RESEARCHLAB_CODEX_SERVICE_TIER").ok();
+        overrides.extend(codex_service_tier_override(tier.as_deref()));
+    }
+    overrides
+}
+
+#[cfg(test)]
+mod service_tier_tests {
+    use super::codex_service_tier_override;
+
+    #[test]
+    fn only_a_tier_known_to_work_is_passed_to_codex() {
+        assert_eq!(codex_service_tier_override(Some("fast")).as_deref(), Some("service_tier=\"fast\""));
+        assert_eq!(codex_service_tier_override(Some(" Priority ")).as_deref(), Some("service_tier=\"priority\""));
+        assert_eq!(codex_service_tier_override(Some("default")).as_deref(), Some("service_tier=\"default\""));
+        // `flex` fails the turn with a 400; an unknown name is an error item in the stream.
+        for refused in ["flex", "ultrafast", "", "fast\" , sandbox_mode=\"danger-full-access"] {
+            assert_eq!(codex_service_tier_override(Some(refused)), None, "{refused}");
+        }
+        assert_eq!(codex_service_tier_override(None), None);
+    }
 }
 
 pub(crate) fn codex_fallback_payload(

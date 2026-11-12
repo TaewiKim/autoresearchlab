@@ -119,11 +119,33 @@ pub(crate) fn append_completed_labdirector_next_actions(
         latest_executable_analyst_handoff_waiting_for_runner(paths, cycle_id)?;
     // Every director with orders still standing, not only the newest one; see
     // labdirector::work_orders for what the newest-only reading cost.
-    let standing = standing_work_order_payloads(
-        paths,
-        cycle_id,
-        completed_labdirector_requery_payloads(paths, cycle_id)?,
-    );
+    let newest = completed_labdirector_requery_payloads(paths, cycle_id)?;
+    // MEASURED ON cycle-a-20260919, 2026-11-11: after three
+    // provisioning lanes, Director 1943's audit sat at owner_selection. The
+    // graph flattened its instruction without provenance; text deduplication
+    // then discarded the ledger's dispatchable version. Replace these summary
+    // projections with ledger orders, including their canonical source keys and
+    // completion/cancellation state, for every dispatchable role/action pair.
+    let mut summaries = Vec::new();
+    ranked_actions.retain(|action| {
+        let is_summary = work_order_dispatchable(
+                action.get("preferred_role").and_then(Value::as_str).unwrap_or(""),
+                action.get("type").and_then(Value::as_str).unwrap_or(""),
+            )
+            && newest.iter().any(|(lane_id, payload)| {
+                action.get("brief_id").and_then(Value::as_str) == Some(lane_id.as_str())
+                    && payload.get("next_actions").and_then(Value::as_array).is_some_and(|items| {
+                        items.iter().any(|item| item.get("type") == action.get("type")
+                            && item.get("preferred_role") == action.get("preferred_role")
+                            && item.get("description") == action.get("description"))
+                    })
+            });
+        if is_summary {
+            summaries.push(action.clone());
+        }
+        !is_summary
+    });
+    let standing = standing_work_order_payloads(paths, cycle_id, newest);
     for (labdirector_lane_id, payload) in standing {
         let Some(next_actions) = payload.get("next_actions").and_then(Value::as_array) else {
             continue;
@@ -248,21 +270,24 @@ pub(crate) fn append_completed_labdirector_next_actions(
             if description.is_empty() {
                 continue;
             }
-            let already_present = ranked_actions.iter().any(|existing| {
-                existing.get("type").and_then(Value::as_str) == Some(action_type)
-                    && existing.get("preferred_role").and_then(Value::as_str)
-                        == Some(preferred_role)
-                    && existing
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .map(|item| item.trim() == description)
-                        .unwrap_or(false)
-            });
-            if already_present {
-                trace_order(action, "queued (the plan already ranks the same action)");
-                continue;
-            }
             let mut queued_action = action.clone();
+            // Preserve the graph's ranking and review context, while the order
+            // supplies dispatch identity. Synthesized actions (for example a
+            // structured Chronicle question) are not next-action summaries.
+            if let Some(summary) = summaries.iter().find(|summary| {
+                summary.get("type").and_then(Value::as_str) == Some(action_type)
+                    && summary.get("preferred_role").and_then(Value::as_str) == Some(preferred_role)
+                    && summary.get("description").and_then(Value::as_str)
+                        .is_some_and(|item| item.trim() == description)
+            }) {
+                for key in ["priority", "priority_score", "target_rubric", "target_score", "current_score", "blocker_reasons"] {
+                    if queued_action.get(key).is_none() {
+                        if let Some(value) = summary.get(key) {
+                            queued_action[key] = value.clone();
+                        }
+                    }
+                }
+            }
             if let Some(fields) = queued_action.as_object_mut() {
                 fields.remove("work_order_done");
                 fields.remove("work_order_from_earlier_director");
@@ -338,6 +363,14 @@ pub(crate) fn append_completed_labdirector_next_actions(
                     ])
                 });
             trace_order(&queued_action, "queued");
+            // Other plan readers can summarize the same instruction too. Keep
+            // one dispatch action, with the ledger's provenance and source key.
+            ranked_actions.retain(|existing| {
+                !(existing.get("type") == queued_action.get("type")
+                    && existing.get("preferred_role") == queued_action.get("preferred_role")
+                    && existing.get("description").and_then(Value::as_str)
+                        .is_some_and(|item| item.trim() == description))
+            });
             ranked_actions.push(queued_action);
         }
     }
