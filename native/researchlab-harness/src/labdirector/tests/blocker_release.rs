@@ -971,3 +971,40 @@ fn a_withdrawing_directors_override_releases_its_blocker_without_a_hypothesis_ar
     assert!(dependency_gate_override_for(&paths, cycle, "waiting-for-lab-director-hypothesis artifact_exists=false path=x").is_some());
     assert!(dependency_gate_override_for(&paths, cycle, "waiting-for-core-experiments x=0").is_none());
 }
+
+
+// MEASURED ON cycle-a-20260919, 2026-11-14: a recovery-planning director
+// for every failed literature resume, while the resume path queued the next one.
+#[test]
+fn a_literature_failure_has_one_owner_the_resume_until_it_gives_up_then_the_director() {
+    let temp = TempDir::new().unwrap();
+    let paths = build_paths(temp.path());
+    let cycle = "one-owner";
+    write_cycle_state_with_alerts(&paths, cycle, &[("followup-scout-764", "scout")]);
+    let lane_dir = cycle_lanes_root(&paths, cycle).join("followup-scout-764");
+    fs::create_dir_all(&lane_dir).unwrap();
+    create_lane_contract(&paths, cycle, "followup-scout-764", "scout", "codex-agent", "read-write-scoped", "resume").unwrap();
+    write_json(&lane_dir.join("role-plan.json"), &json!({"action_type": "adaptive_search_followup"})).unwrap();
+    write_json(&lane_dir.join("final-status.json"), &json!({"lane_id": "followup-scout-764", "status": "failed", "completed_at": now_iso()})).unwrap();
+    write_json(&lane_dir.join("result.json"), &json!({
+        "status": "insufficient_corpus",
+        "failure_category": "adaptive_literature_search_incomplete",
+        "recommended_actions": [{"type": "adaptive_search_followup", "priority": "high", "source_lane_id": "followup-scout-764"}],
+    })).unwrap();
+
+    // The resume is offered, so the director is not asked yet.
+    let mut resumes = Vec::new();
+    collect_failed_literature_recovery_actions(&paths, cycle, &mut resumes).unwrap();
+    assert_eq!(resumes.len(), 1, "{resumes:?}");
+    let mut asks = Vec::new();
+    collect_blocking_failure_recovery_actions(&paths, cycle, &mut asks).unwrap();
+    assert!(asks.is_empty(), "the director was asked about a lane the harness is resuming: {asks:?}");
+
+    // Once a director has decided on it, the harness no longer resumes it.
+    write_answered_recovery_lane(&paths, cycle, "followup-lab-director-1961", &[
+        "followup-scout-764 (scout) stopped on adaptive_literature_search_incomplete; it is a blocking lane.",
+    ]);
+    let mut resumes = Vec::new();
+    collect_failed_literature_recovery_actions(&paths, cycle, &mut resumes).unwrap();
+    assert!(resumes.is_empty(), "the director's decision was answered by another resume: {resumes:?}");
+}

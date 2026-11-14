@@ -86,8 +86,23 @@ pub(crate) fn collect_blocking_failure_recovery_actions(
     if lanes.is_empty() {
         return Ok(());
     }
-    // Only the failures no director has planned for yet are the question.
-    let answered = lanes_already_planned_for(paths, cycle_id);
+    // Only the failures no director has planned for yet are the question --
+    // and not a literature failure the harness is still resuming on its own.
+    //
+    // MEASURED ON cycle-a-20260919, 2026-11-14: each failed literature
+    // resume raised a recovery-planning director (1956, 1957, 1961, 1962 in
+    // seventy minutes) while the resume path opened the lineage's next scout
+    // anyway. The directors answered "repeating this will not resolve it"; the
+    // next resume was already queued. One owner per failure: the automatic
+    // resume while it is offered, the director once it has given up.
+    let mut automatic = Vec::new();
+    super::collect_failed_literature_recovery_actions(paths, cycle_id, &mut automatic)?;
+    let being_resumed: std::collections::BTreeSet<String> = automatic
+        .iter()
+        .filter_map(|action| action.get("source_lane_id").and_then(Value::as_str).map(str::to_string))
+        .collect();
+    let mut answered = lanes_already_planned_for(paths, cycle_id);
+    answered.extend(being_resumed);
     let mut pending_lanes = Vec::new();
     let mut pending_blockers = Vec::new();
     for (lane_id, blocker) in lanes.iter().zip(blockers.iter()) {
@@ -153,7 +168,7 @@ fn recovery_already_planned_for(paths: &AppPaths, cycle_id: &str, lanes: &[Strin
 /// 220 ... then 296 lanes, analyst-04 from the first day among them -- because
 /// one more analyst had failed. Now a lane a completed recovery plan was given
 /// is answered, and only the failures nobody has planned for are asked about.
-fn lanes_already_planned_for(paths: &AppPaths, cycle_id: &str) -> std::collections::BTreeSet<String> {
+pub(crate) fn lanes_already_planned_for(paths: &AppPaths, cycle_id: &str) -> std::collections::BTreeSet<String> {
     let mut answered = std::collections::BTreeSet::new();
     let Ok(entries) = read_dir(cycle_lanes_root(paths, cycle_id)) else {
         return answered;

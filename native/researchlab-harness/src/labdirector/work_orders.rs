@@ -196,7 +196,90 @@ fn issuer_stub(payload: &Value) -> Value {
 }
 
 /// Record one director decision: its cancellations, then its orders.
+/// Read a director's decision as orders, as if it had seen every order recorded so far.
+#[cfg(test)]
 fn ingest_director(ledger: &mut Value, lane_id: &str, completed_at: &str, payload: &Value, lead: &str) -> bool {
+    ingest_director_seeing(ledger, lane_id, completed_at, payload, lead, Some(DateTime::<Utc>::MAX_UTC))
+}
+
+/// The order ids a `cancel_work_order` description withdraws.
+///
+/// The form directors are given is `"<order_id>: why"`, so the ids are the ones
+/// before the first colon; a description without that form withdraws the first
+/// id it names. Every other id is context. MEASURED ON cycle-a-20260919,
+/// 2026-11-14: director 1951 closed wo-9b31b46ea3 with "... Existing RE4 audit
+/// wo-65c58c4d67 remains standing unchanged", and the ledger, which cancelled every
+/// id the text contained, cancelled the audit it had just been told to keep.
+fn cancel_targets(description: &str) -> Vec<String> {
+    let ids = |text: &str| -> Vec<String> {
+        text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .filter(|token| token.len() > 3 && token.starts_with("wo-") && token[3..].chars().all(|c| c.is_ascii_hexdigit()))
+            .map(str::to_string)
+            .collect()
+    };
+    if let Some((head, _)) = description.split_once(':') {
+        let named = ids(head);
+        if !named.is_empty() {
+            return named;
+        }
+    }
+    ids(description).into_iter().take(1).collect()
+}
+
+/// Reopen an order cancelled only because a cancel's text mentioned it.
+fn reopen_mentioned_not_cancelled(ledger: &mut Value) -> bool {
+    let mut changed = false;
+    for order in orders_mut(ledger).iter_mut() {
+        if text(order, "status") != "cancelled" || !order.get("done_at").map_or(true, Value::is_null) {
+            continue;
+        }
+        let reason = text(order, "closed_reason").to_string();
+        let Some(rest) = reason.strip_prefix("cancelled by ") else { continue };
+        let Some((by, description)) = rest.split_once(": ") else { continue };
+        if cancel_targets(description).iter().any(|id| id == text(order, "order_id")) {
+            continue;
+        }
+        order["status"] = json!("standing");
+        order["reopened_from"] = json!({"status": "cancelled", "by": by, "reason": reason});
+        order["closed_reason"] = Value::Null;
+        order["closed_at"] = Value::Null;
+        changed = true;
+    }
+    changed
+}
+
+/// Whether a director could see `order` when it decided: it was launched after the
+/// order was issued, i.e. after the director that issued it had finished.
+///
+/// By issue time, not by when the ledger recorded it: the ledger's first reading
+/// on 2026-11-10 recorded a day of orders in one instant, and judging by that
+/// instant made every director of that day blind to its predecessors -- the
+/// repair below then reopened three orders their successors had replaced on
+/// purpose, and scout 759 redid an audit Scout 738 had already finished.
+fn director_saw(order: &Value, launched_at: Option<DateTime<Utc>>) -> bool {
+    match (launched_at, parse_time(order.get("issued_at")).or_else(|| parse_time(order.get("recorded_at")))) {
+        (Some(launched), Some(recorded)) => launched >= recorded,
+        _ => false,
+    }
+}
+
+/// Read a director's decision as orders.
+///
+/// `launched_at` is when the director's agent started. A newer order replaces an
+/// older one of the same role and type only when its director could have read
+/// the older one. MEASURED ON cycle-a-20260919, 2026-11-14: directors
+/// 1949 and 1950 ran side by side on different briefs. 1949 reopened the RE4
+/// citation audit; 1950, launched before that order existed, ordered a review of
+/// scout 752's saved queue -- another scout `novelty_followup` -- and the ledger
+/// closed the RE4 audit as "superseded" by an order that had never heard of it.
+fn ingest_director_seeing(
+    ledger: &mut Value,
+    lane_id: &str,
+    completed_at: &str,
+    payload: &Value,
+    lead: &str,
+    launched_at: Option<DateTime<Utc>>,
+) -> bool {
     let actions: Vec<Value> = payload
         .get("next_actions")
         .and_then(Value::as_array)
@@ -211,8 +294,9 @@ fn ingest_director(ledger: &mut Value, lane_id: &str, completed_at: &str, payloa
             continue;
         }
         let description = text(action, "description").to_string();
+        let targets = cancel_targets(&description);
         for order in orders_mut(ledger).iter_mut() {
-            if is_standing(order) && description.contains(text(order, "order_id")) && !text(order, "order_id").is_empty() {
+            if is_standing(order) && targets.iter().any(|id| id == text(order, "order_id")) {
                 close(order, "cancelled", format!("cancelled by {lane_id}: {}", description.chars().take(300).collect::<String>()));
                 changed = true;
             }
@@ -230,15 +314,18 @@ fn ingest_director(ledger: &mut Value, lane_id: &str, completed_at: &str, payloa
         if orders(ledger).iter().any(|order| text(order, "order_id") == id) {
             continue;
         }
-        // The newer wording of the same kind of order replaces the older one.
+        // The newer wording of the same kind of order replaces the older one --
+        // when the newer director had the older one in front of it.
         for order in orders_mut(ledger).iter_mut() {
             if is_open(order)
                 && text(order, "role") == role
                 && text(order, "type") == action_type
                 && text(order, "issued_by") != lane_id
                 && text(order, "source") == "lab-director"
+                && director_saw(order, launched_at)
             {
                 close(order, "superseded", format!("{lane_id} issued a newer {role} {action_type} order ({id})"));
+                order["superseded_by"] = json!(lane_id);
             }
         }
         let mut record = json!({
@@ -530,8 +617,10 @@ pub(crate) fn refresh_work_orders(paths: &AppPaths, cycle_id: &str) -> Result<Va
         newest = newest.max(completed_at);
         let Some(payload) = director_payload(&lane_dir.join("result.json")) else { continue };
         let stamp = completed_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        changed |= ingest_director(&mut ledger, &lane_id, &stamp, &payload, &lead);
+        changed |= ingest_director_seeing(&mut ledger, &lane_id, &stamp, &payload, &lead, lane_launched_at(&lane_dir));
     }
+    changed |= reopen_blind_supersessions(&mut ledger, &|lane_id: &str| lane_launched_at(&lane_root(paths, cycle_id, lane_id)));
+    changed |= reopen_mentioned_not_cancelled(&mut ledger);
     if parse_time(ledger.get("watermark")) != Some(newest) {
         ledger["watermark"] = json!(newest.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
         changed = true;
@@ -901,6 +990,37 @@ pub(crate) fn work_orders_director_context(paths: &AppPaths, cycle_id: &str) -> 
     })
 }
 
+/// Reopen an order closed as superseded by a director that could not have seen it.
+///
+/// For orders closed before `director_saw` existed; the superseding lane is in
+/// `superseded_by`, or named first in the reason the old rule wrote.
+fn reopen_blind_supersessions(ledger: &mut Value, launched_at: &dyn Fn(&str) -> Option<DateTime<Utc>>) -> bool {
+    let mut changed = false;
+    for order in orders_mut(ledger).iter_mut() {
+        if text(order, "status") != "superseded" || !order.get("done_at").map_or(true, Value::is_null) {
+            continue;
+        }
+        let by = match order.get("superseded_by").and_then(Value::as_str) {
+            Some(lane_id) => lane_id.to_string(),
+            None => text(order, "closed_reason").split_whitespace().next().unwrap_or("").to_string(),
+        };
+        if !by.starts_with("followup-lab-director-") {
+            continue;
+        }
+        let Some(launched) = launched_at(&by) else { continue };
+        if director_saw(order, Some(launched)) {
+            continue;
+        }
+        order["status"] = json!("standing");
+        order["reopened_from"] = json!({"status": "superseded", "by": by, "reason": order.get("closed_reason").cloned().unwrap_or(Value::Null)});
+        order["closed_reason"] = Value::Null;
+        order["closed_at"] = Value::Null;
+        order["superseded_by"] = Value::Null;
+        changed = true;
+    }
+    changed
+}
+
 /// When a lane's agent was launched. The invocation record is written at launch,
 /// after the role plan's last refresh, so a director launched after the ledger
 /// recorded an order done has that order, and who carried it out, in its context.
@@ -1211,6 +1331,105 @@ mod tests {
             {"type": "cancel_work_order", "preferred_role": "lab-director", "description": format!("{runner_id}: the anchor is no longer the plan")},
         ])), "withdrawn");
         assert_eq!(open_ids(&ledger), vec!["d2:scout"]);
+    }
+
+    // MEASURED: director 1950 closed 1949's RE4 audit without having seen it.
+    #[test]
+    fn an_order_is_replaced_only_by_a_director_that_could_see_it() {
+        let at = |iso: &str| parse_time(Some(&json!(iso)));
+        let mut ledger = empty_ledger();
+        ingest_director_seeing(&mut ledger, "followup-lab-director-1949", "2026-11-14T02:45:35Z", &director(json!([
+            {"type": "novelty_followup", "preferred_role": "scout", "description": "reopen the RE4 citation audit"},
+        ])), "withdrawn", at("2026-11-14T02:43:40Z"));
+        orders_mut(&mut ledger)[0]["recorded_at"] = json!("2026-11-14T02:45:40Z");
+        // The ledger's first reading records a day of orders at once; what counts
+        // is when each was issued.
+        let mut bootstrap = empty_ledger();
+        ingest_director_seeing(&mut bootstrap, "followup-lab-director-1913", "2026-11-10T00:56:56Z", &director(json!([
+            {"type": "novelty_followup", "preferred_role": "scout", "description": "audit, first wording"},
+        ])), "withdrawn", at("2026-11-10T00:40:00Z"));
+        orders_mut(&mut bootstrap)[0]["recorded_at"] = json!("2026-11-10T07:30:40Z");
+        ingest_director_seeing(&mut bootstrap, "followup-lab-director-1914", "2026-11-10T01:15:03Z", &director(json!([
+            {"type": "novelty_followup", "preferred_role": "scout", "description": "audit, second wording"},
+        ])), "withdrawn", at("2026-11-10T01:00:00Z"));
+        assert_eq!(open_ids(&bootstrap), vec!["followup-lab-director-1914:scout"], "1914 was launched after 1913 had issued");
+        // Launched before the RE4 order was recorded: both orders stand.
+        ingest_director_seeing(&mut ledger, "followup-lab-director-1950", "2026-11-14T02:46:00Z", &director(json!([
+            {"type": "novelty_followup", "preferred_role": "scout", "description": "review scout 752's saved queue"},
+        ])), "withdrawn", at("2026-11-14T02:43:45Z"));
+        assert_eq!(open_ids(&ledger), vec!["followup-lab-director-1949:scout", "followup-lab-director-1950:scout"]);
+        // A director launched after it had both in its context, and may replace them.
+        orders_mut(&mut ledger)[1]["recorded_at"] = json!("2026-11-14T02:46:05Z");
+        ingest_director_seeing(&mut ledger, "followup-lab-director-1951", "2026-11-14T03:10:00Z", &director(json!([
+            {"type": "novelty_followup", "preferred_role": "scout", "description": "one audit covering both"},
+        ])), "withdrawn", at("2026-11-14T03:00:00Z"));
+        assert_eq!(open_ids(&ledger), vec!["followup-lab-director-1951:scout"]);
+        assert_eq!(orders(&ledger)[0]["superseded_by"], json!("followup-lab-director-1951"));
+    }
+
+    #[test]
+    fn an_order_the_old_rule_closed_blind_is_reopened() {
+        let mut ledger = empty_ledger();
+        orders_mut(&mut ledger).push(json!({
+            "order_id": "wo-65c58c4d67", "source": "lab-director", "issued_by": "followup-lab-director-1949", "role": "scout", "type": "novelty_followup",
+            "recorded_at": "2026-11-14T02:45:40Z", "status": "superseded", "done_at": null,
+            "closed_reason": "followup-lab-director-1950 issued a newer scout novelty_followup order (wo-9b31b46ea3)", "closed_at": "2026-11-14T02:46:10Z",
+        }));
+        let launched = |lane_id: &str| match lane_id {
+            "followup-lab-director-1950" => parse_time(Some(&json!("2026-11-14T02:43:45Z"))),
+            _ => None,
+        };
+        assert!(reopen_blind_supersessions(&mut ledger, &launched));
+        let order = &orders(&ledger)[0];
+        assert!(is_open(order), "{order}");
+        assert_eq!(order["reopened_from"]["by"], json!("followup-lab-director-1950"));
+        assert!(!reopen_blind_supersessions(&mut ledger, &launched), "settled");
+
+        // One the superseding director did see stays closed.
+        let mut seen = empty_ledger();
+        let mut order = orders(&ledger)[0].clone();
+        order["status"] = json!("superseded");
+        order["superseded_by"] = json!("followup-lab-director-1951");
+        orders_mut(&mut seen).push(order);
+        assert!(!reopen_blind_supersessions(&mut seen, &|_| parse_time(Some(&json!("2026-11-14T03:00:00Z")))));
+    }
+
+    #[test]
+    fn a_cancel_withdraws_the_orders_it_names_first_not_the_ones_it_mentions() {
+        let kept = "Close as carried out by followup-scout-756. Existing RE4 audit wo-65c58c4d67 remains standing unchanged.";
+        assert_eq!(cancel_targets(&format!("wo-9b31b46ea3: {kept}")), vec!["wo-9b31b46ea3"]);
+        assert_eq!(cancel_targets("wo-aa11, wo-bb22: both done; wo-cc33 stays"), vec!["wo-aa11", "wo-bb22"]);
+        assert_eq!(cancel_targets("Cancel wo-aa11 because wo-bb22 covers it"), vec!["wo-aa11"]);
+        assert!(cancel_targets("nothing named here: at all").is_empty());
+
+        let mut ledger = empty_ledger();
+        ingest_director(&mut ledger, "d1", "2026-11-14T02:45:35Z", &director(json!([
+            {"type": "novelty_followup", "preferred_role": "scout", "description": "the RE4 audit"},
+            {"type": "methods_followup", "preferred_role": "lab-runner", "description": "the screening repair"},
+        ])), "withdrawn");
+        let ids: Vec<String> = orders(&ledger).iter().map(|order| text(order, "order_id").to_string()).collect();
+        ingest_director(&mut ledger, "d2", "2026-11-14T03:04:07Z", &director(json!([
+            {"type": "cancel_work_order", "preferred_role": "lab-director", "description": format!("{}: done. Existing RE4 audit {} remains standing unchanged.", ids[1], ids[0])},
+        ])), "withdrawn");
+        assert_eq!(open_ids(&ledger), vec!["d1:scout"]);
+    }
+
+    #[test]
+    fn an_order_cancelled_for_being_mentioned_is_reopened() {
+        let mut ledger = empty_ledger();
+        orders_mut(&mut ledger).push(json!({
+            "order_id": "wo-65c58c4d67", "role": "scout", "type": "novelty_followup", "status": "cancelled", "done_at": null,
+            "closed_reason": "cancelled by followup-lab-director-1951: wo-9b31b46ea3: Close as carried out by followup-scout-756. Existing RE4 audit wo-65c58c4d67 remains stand",
+        }));
+        orders_mut(&mut ledger).push(json!({
+            "order_id": "wo-9b31b46ea3", "role": "scout", "type": "novelty_followup", "status": "cancelled", "done_at": null,
+            "closed_reason": "cancelled by followup-lab-director-1951: wo-9b31b46ea3: Close as carried out by followup-scout-756. Existing RE4 audit wo-65c58c4d67 remains stand",
+        }));
+        assert!(reopen_mentioned_not_cancelled(&mut ledger));
+        assert!(is_open(&orders(&ledger)[0]));
+        assert_eq!(orders(&ledger)[0]["reopened_from"]["by"], json!("followup-lab-director-1951"));
+        assert_eq!(text(&orders(&ledger)[1], "status"), "cancelled", "the order it named stays cancelled");
+        assert!(!reopen_mentioned_not_cancelled(&mut ledger));
     }
 
     #[test]

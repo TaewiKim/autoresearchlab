@@ -223,7 +223,7 @@ def semanticscholar_api_key() -> str:
     return (os.environ.get("RESEARCHLAB_S2_API_KEY") or "").strip()
 
 
-def _semanticscholar_get(url: str, fetch=None) -> dict:
+def _semanticscholar_get(url: str, fetch=None, max_age_seconds: float | None = None) -> dict:
     """One Graph API GET through the shared polite fetch layer.
 
     Pacing (about 1 request/s, shared across threads AND processes by the
@@ -237,8 +237,8 @@ def _semanticscholar_get(url: str, fetch=None) -> dict:
         return fetch(url)
     key = semanticscholar_api_key()
     if key:
-        return fetch_json_with_headers(url, {"x-api-key": key})
-    return fetch_json(url)
+        return fetch_json_with_headers(url, {"x-api-key": key}, max_age_seconds=max_age_seconds)
+    return fetch_json(url, max_age_seconds=max_age_seconds)
 
 
 _ARXIV_FIELD_TERM_RE = re.compile(r"\b(?:ti|abs|au|all|co|jr|rn):", re.IGNORECASE)
@@ -301,7 +301,8 @@ def semanticscholar_paper(identifier: str, fetch=None) -> dict | None:
     return payload if isinstance(payload, dict) and payload.get("paperId") else None
 
 
-def semanticscholar_neighbours(identifier: str, direction: str, limit: int = 40, fetch=None) -> list[dict]:
+def semanticscholar_neighbours(identifier: str, direction: str, limit: int = 40, fetch=None,
+                               max_age_seconds: float | None = None) -> list[dict]:
     """Papers the parent cites (``references``) or that cite it (``citations``).
 
     Each neighbour comes back with the same fields as a search hit, abstract
@@ -313,7 +314,8 @@ def semanticscholar_neighbours(identifier: str, direction: str, limit: int = 40,
         {"fields": SEMANTIC_SCHOLAR_PAPER_FIELDS, "limit": str(max(1, min(int(limit), 1000)))}
     )
     path = urllib.parse.quote(clean_text(identifier), safe=":/")
-    payload = _semanticscholar_get(f"{SEMANTIC_SCHOLAR_API_URL}/paper/{path}/{direction}?{params}", fetch)
+    payload = _semanticscholar_get(f"{SEMANTIC_SCHOLAR_API_URL}/paper/{path}/{direction}?{params}", fetch,
+                                   max_age_seconds=max_age_seconds)
     key = "citedPaper" if direction == "references" else "citingPaper"
     neighbours = []
     for row in (payload or {}).get("data") or []:

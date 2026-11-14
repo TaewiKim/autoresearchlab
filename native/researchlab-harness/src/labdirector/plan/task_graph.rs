@@ -742,6 +742,37 @@ pub fn rewrite_task_graph(paths: &AppPaths, cycle_id: &str) -> Result<PathBuf> {
 /// another resume stops being offered.
 const MAX_LITERATURE_RECOVERY_FAILURES: usize = 3;
 
+/// How long after a literature search first failed the harness still resumes it
+/// on its own. `RESEARCHLAB_LITERATURE_RECOVERY_MAX_AGE_HOURS`, default 48; 0
+/// means no limit.
+///
+/// MEASURED ON cycle-a-20260919, 2026-11-13/14: 45 failed literature
+/// lanes had never been resumed, 42 of them from October, searches for leads the
+/// cycle withdrew weeks ago. Each pass with a free scout slot resumed the oldest
+/// remaining one -- scouts 753, 758 and 761 resumed scouts 461, 466 and 471 of
+/// 2026-10-14 -- and each lineage may be retried three times, so the backlog was
+/// a hundred-odd lanes whose result nobody would read. A director that wants an
+/// old search finished orders it.
+fn literature_recovery_max_age() -> Option<chrono::Duration> {
+    let hours = env::var("RESEARCHLAB_LITERATURE_RECOVERY_MAX_AGE_HOURS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .filter(|hours| *hours >= 0)
+        .unwrap_or(48);
+    (hours > 0).then(|| chrono::Duration::hours(hours))
+}
+
+/// When a lane ended: its final status's time, else when that file was written.
+fn lane_ended_at(lane_dir: &Path) -> Option<DateTime<Utc>> {
+    let path = lane_dir.join("final-status.json");
+    read_json(&path)
+        .ok()
+        .and_then(|status| status.get("completed_at").and_then(Value::as_str).map(str::to_string))
+        .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
+        .map(|value| value.with_timezone(&Utc))
+        .or_else(|| fs::metadata(&path).and_then(|meta| meta.modified()).ok().map(DateTime::<Utc>::from))
+}
+
 /// Stable terminal class for a failed literature attempt. Paper counts and the
 /// exact validation-error list are progress diagnostics, not a new failure.
 fn literature_recovery_failure_class(result: &Value) -> String {
@@ -957,7 +988,13 @@ pub(crate) fn collect_failed_literature_recovery_actions(
     // attempt suffix made each replay's task signature new. Keep independent
     // recovery roots, but resume only their newest durable checkpoint.
     let latest_recovery_sources = latest_literature_recovery_sources(paths, cycle_id)?;
+    // A failure a director has already decided on is the director's: "do not
+    // repeat the unchanged assignment" must not be answered by repeating it.
+    let decided_by_director = super::lanes_already_planned_for(paths, cycle_id);
     for (lane_id, lane_dir) in lane_dirs_from_contract_index(paths, cycle_id)? {
+        if decided_by_director.contains(&lane_id) {
+            continue;
+        }
         let final_status_path = lane_dir.join("final-status.json");
         let result_path = lane_dir.join("result.json");
         if !final_status_path.exists()
@@ -976,6 +1013,13 @@ pub(crate) fn collect_failed_literature_recovery_actions(
         }
         if !latest_recovery_sources.contains(&lane_id) {
             continue;
+        }
+        // A search the cycle stopped asking for is not resumed by itself.
+        if let Some(max_age) = literature_recovery_max_age() {
+            let root = literature_recovery_root(paths, cycle_id, &lane_id);
+            if lane_ended_at(&lane_root(paths, cycle_id, &root)).is_some_and(|ended| Utc::now() - ended > max_age) {
+                continue;
+            }
         }
         let result = read_lane_result_json(&result_path)?;
         let failure_class = literature_recovery_failure_class(&result);

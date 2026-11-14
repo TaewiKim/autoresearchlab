@@ -33,13 +33,31 @@ import re
 import urllib.parse
 
 from .constants import CROSSREF_WORKS_URL, OPENCITATIONS_INDEX_URL
-from .http_client import clean_text, fetch_json
+from .http_client import RequestBudgetExhausted, clean_text, fetch_json, request_limits
 from .normalize import normalize_crossref_paper, normalize_semanticscholar_paper
 from .providers import semanticscholar_neighbours
-from .key_gates import source_enabled
+from .key_gates import disabled_reason, source_enabled
 
 # The two directions and the inquiry intent each one satisfies.
 DIRECTIONS = {"references": "backward_citation", "citations": "forward_citation"}
+# The providers a citation inquiry can ask, in the order it asks them. `crossref`
+# covers both the deposited reference list and the neighbours' metadata.
+CITATION_SOURCES = ("opencitations", "crossref", "semanticscholar")
+
+
+def citation_sources(names) -> list[str]:
+    """The named citation providers, or all of them; an unknown name is an error."""
+    chosen: list[str] = []
+    for item in names or []:
+        for name in str(item).split(","):
+            name = name.strip().lower().replace("_", "").replace("-", "")
+            if not name:
+                continue
+            if name not in CITATION_SOURCES:
+                raise ValueError(f"unknown citation source {name!r}; choose from {', '.join(CITATION_SOURCES)}")
+            if name not in chosen:
+                chosen.append(name)
+    return chosen or list(CITATION_SOURCES)
 DEFAULT_NEIGHBOUR_LIMIT = 40
 METADATA_BATCH_SIZE = 20
 _DOI_TOKEN = re.compile(r"(?:^|\s)doi:(\S+)")
@@ -72,11 +90,23 @@ def bare_arxiv_id(value: str | None) -> str:
     return match.group(1) if match else ""
 
 
+def citation_cache_max_age(direction: str) -> float | None:
+    """How old a cached answer may be: a reference list is fixed once published,
+    the works citing a paper are not. The frontier harvest's TTL, for the same
+    reason (RESEARCHLAB_FRONTIER_CACHE_TTL_HOURS, default 72 h)."""
+    if direction != "citations":
+        return None
+    from .frontier import cache_ttl_seconds
+
+    return cache_ttl_seconds()
+
+
 def graph_neighbours(parent_ref: str, direction: str, limit: int) -> list[dict]:
     """Neighbours from Semantic Scholar's graph, already carrying abstracts."""
     return [
         normalize_semanticscholar_paper(item)
-        for item in semanticscholar_neighbours(parent_ref, direction, limit)
+        for item in semanticscholar_neighbours(parent_ref, direction, limit,
+                                               max_age_seconds=citation_cache_max_age(direction))
     ]
 
 
@@ -90,7 +120,7 @@ def _unique(values):
 
 def index_neighbours(doi: str, direction: str) -> list[str]:
     """DOIs on the other end of the parent's citation links, from the index."""
-    rows = fetch_json(f"{OPENCITATIONS_INDEX_URL}/{direction}/doi:{doi}")
+    rows = fetch_json(f"{OPENCITATIONS_INDEX_URL}/{direction}/doi:{doi}", max_age_seconds=citation_cache_max_age(direction))
     # For "references" the parent is the citing work and the neighbour is cited;
     # for "citations" it is the other way round.
     field = "cited" if direction == "references" else "citing"
@@ -126,8 +156,31 @@ def registry_metadata(dois: list[str]) -> list[dict]:
     return papers
 
 
-def probe_citations(doi: str, direction: str, limit: int = DEFAULT_NEIGHBOUR_LIMIT) -> dict:
-    """One backward or forward citation inquiry, shaped like a query probe."""
+def probe_citations(
+    doi: str,
+    direction: str,
+    limit: int = DEFAULT_NEIGHBOUR_LIMIT,
+    sources=None,
+    max_requests: int | None = None,
+    retries: bool = True,
+) -> dict:
+    """One backward or forward citation inquiry, shaped like a query probe.
+
+    `sources` restricts the providers asked; `max_requests` and `retries` bound
+    the requests sent (see http_client.request_limits). Semantic Scholar answers
+    either direction in ONE request with abstracts included, so
+    `sources=["semanticscholar"], max_requests=1, retries=False` is a one-GET
+    inquiry. A request the budget refuses is recorded as a failure like any
+    other, never raised.
+    """
+    with request_limits(max_requests=max_requests, retries=retries) as receipt:
+        result = _probe_citations(doi, direction, limit, citation_sources(sources))
+    result["request_limits"] = dict(receipt) | {"sources": citation_sources(sources)}
+    result["source_stats"]["request_limits"] = result["request_limits"]
+    return result
+
+
+def _probe_citations(doi: str, direction: str, limit: int, sources: list[str]) -> dict:
     # Imported here: collect imports the providers, and the classification must
     # be the one the keyword probe uses rather than a second copy of it.
     from .collect import _is_throttle_error
@@ -154,6 +207,7 @@ def probe_citations(doi: str, direction: str, limit: int = DEFAULT_NEIGHBOUR_LIM
                 "query": query,
                 "error": str(error),
                 "throttled": _is_throttle_error(error),
+                "budget_exhausted": isinstance(error, RequestBudgetExhausted),
             })
             return []
         hits[source] = len(found)
@@ -162,12 +216,18 @@ def probe_citations(doi: str, direction: str, limit: int = DEFAULT_NEIGHBOUR_LIM
     neighbours: list[str] = []
     papers: list[dict] = []
     if parent:
-        neighbours = attempt("opencitations", lambda: index_neighbours(parent, direction))
-        if direction == "references" and not neighbours:
+        if "opencitations" in sources:
+            neighbours = attempt("opencitations", lambda: index_neighbours(parent, direction))
+        if direction == "references" and not neighbours and "crossref" in sources:
             neighbours = attempt("crossref-deposited-references", lambda: registry_references(parent))
         neighbours = neighbours[:max(0, int(limit))]
-        papers = attempt("crossref", lambda: registry_metadata(neighbours)) if neighbours else []
-    if not papers and source_enabled("semanticscholar"):
+        papers = attempt("crossref", lambda: registry_metadata(neighbours)) if neighbours and "crossref" in sources else []
+    if not papers and "semanticscholar" in sources and not source_enabled("semanticscholar"):
+        # Said, not skipped: a probe restricted to a source that is off would
+        # otherwise return nothing, with no attempt and no failure to show why.
+        failures.append({"source": "semanticscholar", "query": query, "error": disabled_reason("semanticscholar"),
+                         "throttled": False, "budget_exhausted": False, "disabled": True})
+    if not papers and "semanticscholar" in sources and source_enabled("semanticscholar"):
         graph_ref = f"DOI:{parent}" if parent else f"arXiv:{arxiv_parent}"
         papers = attempt("semanticscholar", lambda: graph_neighbours(graph_ref, direction, limit))
         papers = [paper for paper in papers if paper.get("title")][:max(0, int(limit))]

@@ -282,3 +282,20 @@ fn an_analyst_handoffs_unmet_capabilities_become_one_engineer_order() {
     assert!(ranked[0]["description"].as_str().unwrap().contains("CAP-OFFLINE-PUSHT-RUNTIME"));
     assert_eq!(ranked[0]["brief_id"], json!(format!("capability-requirements-{analyst}")));
 }
+
+
+// MEASURED ON cycle-a-20260919, 2026-11-12: scout 750 refused a bounded
+// order it could have carried out, and director 1948 closed the inquiry on it.
+#[test]
+fn every_order_carries_its_limits_as_bounds_and_the_director_is_told_how_to_write_one() {
+    let scout = followup_task_markdown("c", "o", "scout", "b", "audit RE4 citation neighbours", &[]);
+    assert!(scout.contains("order_limits_contract"), "{scout}");
+    assert!(scout.contains("--max-requests"), "the scout is told the bounded probe exists");
+    assert!(scout.contains("proposed_order_change"));
+    assert!(!scout.contains("order_writing_contract"));
+    let engineer = followup_task_markdown("c", "o", "engineer", "b", "repair the loader", &[]);
+    assert!(engineer.contains("order_limits_contract"));
+    let director = followup_task_markdown("c", "o", "lab-director", "b", "decide", &[]);
+    assert!(director.contains("order_writing_contract"), "{director}");
+    assert!(!director.contains("order_limits_contract"));
+}

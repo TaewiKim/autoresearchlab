@@ -195,6 +195,13 @@ pub fn followup_task_markdown(
             ));
         }
     }
+    // Every role that carries out an order: its limits bound the cost, not the
+    // thinking -- see order_limits_directive. The director writes the orders.
+    if role == "lab-director" {
+        lines.push(crate::labdirector::policy::order_writing_directive().to_string());
+    } else {
+        lines.push(crate::labdirector::policy::order_limits_directive().to_string());
+    }
     if role == "lab-director" {
         // Nothing downstream infers the family any more (see
         // lead_family_declaration_directive), so the director must declare it.

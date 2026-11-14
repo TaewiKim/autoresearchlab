@@ -46,6 +46,73 @@ class LiteratureNetworkPolicyError(ValueError):
 REQUEST_STATS = {"requests": 0, "rate_limited": 0}
 
 
+class RequestBudgetExhausted(RuntimeError):
+    """A request refused before it was sent, because the caller's budget is spent."""
+
+
+# The limits a caller put on the requests made inside `request_limits`, or None.
+_ACTIVE_LIMITS: dict | None = None
+
+
+class request_limits:
+    """Bound the network requests made inside this block, and record them.
+
+    MEASURED ON cycle-a-20260919, 2026-11-12: a director ordered a
+    citation-neighbour audit of at most two GETs with no retries, and the scout
+    stopped at preflight with nothing sent, because the driver's citation route
+    retried on its own, fell through three providers and exposed no way to bound
+    either. The director then closed the line of inquiry unanswered.
+
+    `max_requests` counts requests actually sent, retries included; a cache hit
+    sends nothing and counts nothing. With `retries=False` a failed request is
+    not repeated. The receipt says what was sent, to which hosts, and what was
+    refused, so a bounded inquiry can show that it stayed inside its bound.
+    """
+
+    def __init__(self, max_requests: int | None = None, retries: bool = True):
+        if max_requests is not None and int(max_requests) < 0:
+            raise ValueError("max_requests must be zero or more")
+        self.receipt = {
+            "max_requests": None if max_requests is None else int(max_requests),
+            "retries": bool(retries),
+            "requests_sent": 0,
+            "requests_refused": 0,
+            "hosts": [],
+        }
+        self._previous: dict | None = None
+
+    def __enter__(self) -> dict:
+        global _ACTIVE_LIMITS
+        self._previous = _ACTIVE_LIMITS
+        _ACTIVE_LIMITS = self.receipt
+        return self.receipt
+
+    def __exit__(self, *exc) -> bool:
+        global _ACTIVE_LIMITS
+        _ACTIVE_LIMITS = self._previous
+        return False
+
+
+def _admit_request(url: str) -> None:
+    limits = _ACTIVE_LIMITS
+    if limits is None:
+        return
+    cap = limits["max_requests"]
+    if cap is not None and limits["requests_sent"] >= cap:
+        limits["requests_refused"] += 1
+        raise RequestBudgetExhausted(
+            f"request budget of {cap} spent; not sent: {_host_of(url)}"
+        )
+    limits["requests_sent"] += 1
+    host = _host_of(url)
+    if host not in limits["hosts"]:
+        limits["hosts"].append(host)
+
+
+def _retries_allowed() -> bool:
+    return _ACTIVE_LIMITS is None or bool(_ACTIVE_LIMITS["retries"])
+
+
 def approved_scholarly_metadata_policy_enabled() -> bool:
     return os.environ.get(_POLICY_ENV, "").strip() == APPROVED_SCHOLARLY_METADATA_POLICY
 
@@ -382,6 +449,7 @@ def _fetch_raw(url: str, headers: dict | None = None, timeout: float | None = No
     rate_limit_attempts = 0
     rate_limit_slept = 0.0
     while True:
+        _admit_request(url)
         _polite_throttle(url)
         REQUEST_STATS["requests"] += 1
         try:
@@ -396,7 +464,8 @@ def _fetch_raw(url: str, headers: dict | None = None, timeout: float | None = No
                 rate_limit_attempts += 1
                 wait = _rate_limit_wait_seconds(error, rate_limit_attempts)
                 if (
-                    rate_limit_attempts < RATE_LIMIT_MAX_ATTEMPTS
+                    _retries_allowed()
+                    and rate_limit_attempts < RATE_LIMIT_MAX_ATTEMPTS
                     and rate_limit_slept + wait <= rate_limit_budget
                 ):
                     rate_limit_slept += wait
@@ -404,14 +473,16 @@ def _fetch_raw(url: str, headers: dict | None = None, timeout: float | None = No
                     continue
             else:
                 plain_attempts += 1
-                if plain_attempts < MAX_SOURCE_ATTEMPTS:
+                if _retries_allowed() and plain_attempts < MAX_SOURCE_ATTEMPTS:
                     time.sleep(0.5 + plain_attempts)
                     continue
+            raise
+        except RequestBudgetExhausted:
             raise
         except Exception as error:  # timeouts, connection resets, DNS blips
             last_error = error
             plain_attempts += 1
-            if plain_attempts < MAX_SOURCE_ATTEMPTS:
+            if _retries_allowed() and plain_attempts < MAX_SOURCE_ATTEMPTS:
                 time.sleep(0.5 + plain_attempts)
                 continue
             raise
@@ -431,9 +502,27 @@ def query_cache_path(query: str) -> Path:
     return QUERY_CACHE_ROOT / f"{digest}.json"
 
 
-def fetch_json(url: str) -> dict:
+def _fresh_cache(cache_path: Path, max_age_seconds: float | None) -> bool:
+    """Whether a cached answer may stand in for a request.
+
+    The URL cache never expired, which suits a paper's own record and not a
+    count that grows. MEASURED ON cycle-a-20260919, 2026-11-13: RE4's
+    forward citations were cached on 2026-09-20 as "no citing papers", and every
+    lookup for eight weeks was answered from that file without a request.
+    """
+    if not cache_path.exists():
+        return False
+    if max_age_seconds is None:
+        return True
+    try:
+        return time.time() - cache_path.stat().st_mtime <= max_age_seconds
+    except OSError:
+        return False
+
+
+def fetch_json(url: str, max_age_seconds: float | None = None) -> dict:
     cache_path = cache_path_for_url(url)
-    if cache_path.exists():
+    if _fresh_cache(cache_path, max_age_seconds):
         return json.loads(cache_path.read_text(encoding="utf-8"))
     payload = json.loads(_fetch_body(url))
     cache_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -468,7 +557,7 @@ def scopus_enabled() -> bool:
     return bool(scopus_api_key())
 
 
-def fetch_json_with_headers(url: str, headers: dict) -> dict:
+def fetch_json_with_headers(url: str, headers: dict, max_age_seconds: float | None = None) -> dict:
     """Like fetch_json but sends request headers (Scopus needs X-ELS-APIKey).
 
     Shares the URL-keyed cache with fetch_json: the API key travels in the
@@ -476,7 +565,7 @@ def fetch_json_with_headers(url: str, headers: dict) -> dict:
     into the cache path.
     """
     cache_path = cache_path_for_url(url)
-    if cache_path.exists():
+    if _fresh_cache(cache_path, max_age_seconds):
         return json.loads(cache_path.read_text(encoding="utf-8"))
     payload = json.loads(_fetch_body(url, headers=headers))
     cache_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")

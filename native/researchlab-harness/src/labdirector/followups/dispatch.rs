@@ -1624,22 +1624,23 @@ mod failed_literature_recovery_dispatch_tests {
             .unwrap();
         };
 
+        let minutes_ago = |minutes: i64| (Utc::now() - chrono::Duration::minutes(minutes)).to_rfc3339();
         write_failure(
             "followup-scout-11",
             "external_validation_followup",
             None,
-            "2026-09-20T00:00:00Z",
+            &minutes_ago(40),
         );
         for (lane_id, completed_at) in [
-            ("followup-scout-16", "2026-09-20T00:10:00Z"),
-            ("followup-scout-19", "2026-09-20T00:20:00Z"),
-            ("followup-scout-22", "2026-09-20T00:30:00Z"),
+            ("followup-scout-16", minutes_ago(30)),
+            ("followup-scout-19", minutes_ago(20)),
+            ("followup-scout-22", minutes_ago(10)),
         ] {
             write_failure(
                 lane_id,
                 "adaptive_search_followup",
                 Some("followup-scout-11"),
-                completed_at,
+                &completed_at,
             );
         }
 
@@ -1647,6 +1648,16 @@ mod failed_literature_recovery_dispatch_tests {
         collect_failed_literature_recovery_actions(&paths, cycle_id, &mut actions).unwrap();
         assert_eq!(actions.len(), 1, "stale checkpoints were re-offered: {actions:?}");
         assert_eq!(actions[0]["source_lane_id"], "followup-scout-22");
+
+        // MEASURED ON cycle-a-20260919, 2026-11-14: the October backlog.
+        // A lineage whose search first failed days ago is not resumed by itself,
+        // however recent its latest resume.
+        write_failure("followup-scout-461", "reasoning_literature_scout", None, "2026-10-14T11:45:52Z");
+        write_failure("followup-scout-753", "adaptive_search_followup", Some("followup-scout-461"), &minutes_ago(5));
+        let mut actions = Vec::new();
+        collect_failed_literature_recovery_actions(&paths, cycle_id, &mut actions).unwrap();
+        let sources: Vec<&str> = actions.iter().filter_map(|action| action["source_lane_id"].as_str()).collect();
+        assert_eq!(sources, vec!["followup-scout-22"], "an October search was resumed again");
     }
 
     #[test]

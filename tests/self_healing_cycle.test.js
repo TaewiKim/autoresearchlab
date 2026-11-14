@@ -521,6 +521,34 @@ test("a bare line the CLI itself wrote still resets the lane", () => {
   fs.rmSync(cwd, { recursive: true, force: true });
 });
 
+// MEASURED ON cycle-a-20260919, 2026-11-14: the Codex CLI's PATH-alias
+// warning, written on every run, made every failed lane look runtime-blocked.
+test("the CLI's every-run PATH warning does not make a failed lane retryable", () => {
+  const cycleId = "cycle-self-heal-path-alias";
+  const cwd = makeCycle(cycleId);
+  const warning = "WARNING: proceeding, even though we could not create PATH aliases: Operation not permitted (os error 1)";
+  const lane = (laneId, stderr) => {
+    const dir = laneDir(cwd, cycleId, laneId);
+    writeJson(path.join(dir, "lane-contract.json"), { lane_id: laneId, role: "scout", runtime_class: "codex-agent" });
+    writeJson(path.join(dir, "final-status.json"), { lane_id: laneId, status: "failed", failure_category: "adaptive_literature_search_incomplete" });
+    writeJson(path.join(dir, "result.json"), { status: "insufficient_corpus" });
+    fs.writeFileSync(path.join(dir, "stderr.log"), stderr);
+    return dir;
+  };
+  const quiet = lane("followup-scout-754", `${warning}
+`);
+  lane("followup-scout-760", `${warning}
+stream error: rate limit exceeded, retrying in 60s
+`);
+
+  const actions = healCycleOnce({ cwd, cycleId, staleSeconds: 1 });
+  const reset = actions.filter((action) => action.action === "reset_failed_lane").map((action) => action.lane_id);
+
+  assert.deepEqual(reset, ["followup-scout-760"], "only the lane with a real runtime block is retried");
+  assert.equal(fs.existsSync(path.join(quiet, "result.json")), true, "a lane's own result was taken away");
+  fs.rmSync(cwd, { recursive: true, force: true });
+});
+
 test("a lane refused at launch by a since-resolved setup block runs again", () => {
   const cycleId = "cycle-self-heal-resolved-prelaunch-block";
   const cwd = makeCycle(cycleId);

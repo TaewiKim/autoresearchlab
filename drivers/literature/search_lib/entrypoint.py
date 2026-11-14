@@ -766,7 +766,19 @@ def main() -> None:
     parser.add_argument(
         "--sources", "--source", dest="sources", action="append", default=[],
         help="Restrict a --query probe to these sources (repeatable or comma-separated): "
-        "openalex, crossref, arxiv, semanticscholar, pubmed, scopus. The network policy still applies.",
+        "openalex, crossref, arxiv, semanticscholar, pubmed, scopus. With --citations-of: opencitations, "
+        "crossref, semanticscholar (semanticscholar alone answers in one request, abstracts included). "
+        "The network policy still applies.",
+    )
+    parser.add_argument(
+        "--max-requests", type=int, default=None,
+        help="With --citations-of: send at most this many network requests, retries included; a cache hit "
+        "sends none. Requests over the budget are refused and recorded, and the probe reports "
+        "request_limits (sent, refused, hosts).",
+    )
+    parser.add_argument(
+        "--no-retry", action="store_true",
+        help="With --citations-of: never repeat a failed or rate-limited request.",
     )
     parser.add_argument(
         "--fulltext", action="append", default=[],
@@ -859,7 +871,11 @@ def main() -> None:
 
         if args.output_dir and not args.role_plan_file:
             parser.error("Durable --citations-of requires --role-plan-file to bind the research objective")
-        result = probe_citations(args.citations_of, args.direction)
+        try:
+            result = probe_citations(args.citations_of, args.direction, sources=args.sources,
+                                     max_requests=args.max_requests, retries=not args.no_retry)
+        except ValueError as error:
+            parser.error(str(error))
         if args.output_dir:
             plan = json.loads(Path(args.role_plan_file).read_text(encoding="utf-8"))
             result["durable_inquiry"] = persist_candidate_batch(Path(args.output_dir), result, plan)

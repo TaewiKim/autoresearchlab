@@ -115,9 +115,24 @@ function isWindowsSetupStdoutBlock(value) {
     && isWindowsSetupBlock(text);
 }
 
+// Lines the Codex CLI writes on every run, whatever happens in it.
+//
+// MEASURED ON cycle-a-20260919, 2026-11-14: codex-cli 0.166.0 starts
+// every lane in this container with "WARNING: proceeding, even though we could
+// not create PATH aliases: Operation not permitted (os error 1)" on stderr (136
+// of the latest 186 lanes). `operation not permitted` is a retryable runtime
+// block below, so every lane that ended `failed` for any reason of its own read
+// as blocked by the runtime: scouts 751 and 753-755 had their results renamed
+// away and ran again from the start, to end the same way.
+const BENIGN_RUNTIME_LINES = [/could not create PATH aliases/i];
+
+function withoutBenignRuntimeLines(text) {
+  return String(text).split(NEWLINE).filter((line) => !BENIGN_RUNTIME_LINES.some((pattern) => pattern.test(line))).join(NEWLINE);
+}
+
 function isRetryableText(value) {
   if (isWindowsSetupBlock(value)) return false;
-  const text = textOf(value);
+  const text = withoutBenignRuntimeLines(textOf(value));
   return /context_length_exceeded|maximum context length|input exceeds the maximum length|maximum length of 1048576|prompt is too long|too many tokens|context window|requires a newer version of Codex|unsupported model|model .* is not supported|invalid_json_schema|Invalid schema for response_format|text\.format\.schema|EOF while parsing a value|expected value at line 1 column 1|Unexpected end of JSON input|rate limit|rate_limit|too many requests|quota|usage limit|timeout|timed out|no last agent message|uv trampoline|permission denied|operation not permitted|execution (?:was )?blocked|failed to (?:launch|execute|spawn)|result\.json.*not ?created/i.test(text);
 }
 

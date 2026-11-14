@@ -41,7 +41,7 @@ class FakeNetwork:
         self.routes = routes
         self.urls = []
 
-    def __call__(self, url):
+    def __call__(self, url, **_options):
         self.urls.append(url)
         for prefix, reply in self.routes:
             if url.startswith(prefix):
@@ -71,7 +71,7 @@ class CitationGraphTest(unittest.TestCase):
     def run_probe(self, routes, direction, parent=None, **kwargs):
         network = FakeNetwork(routes)
 
-        def graph(ref, graph_direction, limit):
+        def graph(ref, graph_direction, limit, **_options):
             # Semantic Scholar is reached through its own provider; route it
             # through the same fake so no test ever touches the real network.
             return network(f"s2:{ref}/{graph_direction}")
@@ -179,5 +179,107 @@ class CitationGraphTest(unittest.TestCase):
             citation_graph.probe_citations(PARENT, "sideways")
 
 
+class BoundedCitationInquiry(unittest.TestCase):
+    """MEASURED ON cycle-a-20260919, 2026-11-12: an order of at most two
+    GETs with no retries could not be carried out, so it was not attempted."""
+
+    def setUp(self):
+        from drivers.literature.search_lib import http_client
+        self.http = http_client
+        self.sent = []
+
+        def opened(request, timeout=None):
+            self.sent.append(request.full_url)
+            raise urllib.error.HTTPError(request.full_url, 503, "Service Unavailable", {}, None)
+
+        self.patches = [
+            mock.patch.object(http_client, "_open_request", side_effect=opened),
+            mock.patch.object(http_client, "_polite_throttle", lambda url: None),
+            mock.patch.object(http_client, "gate_url", lambda url: None),
+            mock.patch.object(http_client, "approved_scholarly_metadata_policy_enabled", lambda: False),
+            mock.patch.object(http_client, "cache_path_for_url", side_effect=lambda url: Path("/nonexistent/never") / "x.json"),
+            mock.patch.object(http_client.time, "sleep", lambda seconds: None),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self):
+        for patch in self.patches:
+            patch.stop()
+
+    def test_one_source_one_request_no_retry_sends_exactly_one_request(self):
+        result = citation_graph.probe_citations(PARENT, "citations", sources=["semanticscholar"], max_requests=1, retries=False)
+        self.assertEqual(len(self.sent), 1, self.sent)
+        self.assertIn("semanticscholar.org", self.sent[0])
+        limits = result["request_limits"]
+        self.assertEqual(limits["requests_sent"], 1)
+        self.assertEqual(limits["sources"], ["semanticscholar"])
+        self.assertEqual(result["sources"], ["semanticscholar"])
+        self.assertEqual(result["source_stats"]["request_limits"], limits)
+
+    def test_the_budget_refuses_what_is_over_it_and_records_the_refusal(self):
+        result = citation_graph.probe_citations(PARENT, "references", max_requests=2, retries=False)
+        self.assertEqual(len(self.sent), 2, self.sent)
+        limits = result["request_limits"]
+        self.assertEqual((limits["requests_sent"], limits["requests_refused"]), (2, 1))
+        refused = [failure for failure in result["source_stats"]["source_failures"] if failure["budget_exhausted"]]
+        self.assertEqual(len(refused), 1)
+        self.assertEqual(refused[0]["source"], "semanticscholar")
+
+    def test_without_limits_a_failed_request_is_retried_as_before(self):
+        citation_graph.probe_citations(PARENT, "citations", sources=["semanticscholar"])
+        self.assertGreater(len(self.sent), 1, "the ordinary retry still applies when no bound is set")
+        # And the bound is gone once the probe returns.
+        self.assertIsNone(self.http._ACTIVE_LIMITS)
+
+    def test_an_unknown_source_is_refused_before_anything_is_sent(self):
+        with self.assertRaises(ValueError):
+            citation_graph.probe_citations(PARENT, "citations", sources=["openalex"])
+        self.assertEqual(self.sent, [])
+
+
+    def test_a_source_that_is_off_is_reported_not_silently_skipped(self):
+        with mock.patch.object(citation_graph, "source_enabled", lambda source: False):
+            result = citation_graph.probe_citations(PARENT, "citations", sources=["semanticscholar"], max_requests=1)
+        self.assertEqual(self.sent, [])
+        failures = result["source_stats"]["source_failures"]
+        self.assertEqual([(item["source"], item.get("disabled")) for item in failures], [("semanticscholar", True)])
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class ForwardCitationsGoStale(unittest.TestCase):
+    """MEASURED ON cycle-a-20260919, 2026-11-13: an eight-week-old
+    "no citing papers" was served for every forward lookup of RE4."""
+
+    def test_a_stale_forward_answer_is_fetched_again_and_a_reference_list_is_not(self):
+        import json as _json
+        import os as _os
+        import tempfile
+        import time as _time
+        from drivers.literature.search_lib import http_client
+
+        with tempfile.TemporaryDirectory() as root:
+            cached = Path(root) / "x.json"
+            cached.write_text(_json.dumps({"data": []}), encoding="utf-8")
+            old = _time.time() - 60 * 24 * 3600
+            _os.utime(cached, (old, old))
+            sent = []
+
+            def body(url, headers=None):
+                sent.append(url)
+                return _json.dumps({"data": [{"citingPaper": {"title": "A new paper"}}]})
+
+            with mock.patch.object(http_client, "cache_path_for_url", lambda url: cached), \
+                 mock.patch.object(http_client, "_fetch_body", side_effect=body):
+                # A reference list is fixed: the cached copy stands.
+                self.assertEqual(http_client.fetch_json("u", max_age_seconds=citation_graph.citation_cache_max_age("references")), {"data": []})
+                self.assertEqual(sent, [])
+                fresh = http_client.fetch_json("u", max_age_seconds=citation_graph.citation_cache_max_age("citations"))
+                self.assertEqual(len(sent), 1)
+                self.assertEqual(fresh["data"][0]["citingPaper"]["title"], "A new paper")
+                # And the refreshed copy now answers without a request.
+                http_client.fetch_json("u", max_age_seconds=citation_graph.citation_cache_max_age("citations"))
+                self.assertEqual(len(sent), 1)
