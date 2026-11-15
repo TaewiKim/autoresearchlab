@@ -205,6 +205,40 @@ function appendLabDirectorInterrupt({ cwd, cycleId, stagnantRounds, summary, pas
   });
 }
 
+// How soon after one decision-latency interrupt another may be raised.
+//
+// MEASURED ON cycle-a-20260919, 2026-11-15: the interrupt fires once per
+// stagnant supervisor pass, and passes come in pairs -- a long one, then a short
+// one minutes later once the director it woke has answered. Fourteen times that
+// day a second director was opened four to six minutes after the first (2007 at
+// 22:02, 2008 at 22:06), and each said what 2008 wrote: the mailbox shows the
+// first response accepted and no changed evidence accompanies the repeat.
+function latencyInterruptCooldownMs(env = process.env) {
+  const minutes = Number(env.RESEARCHLAB_SUPERVISOR_INTERRUPT_COOLDOWN_MINUTES ?? "60");
+  return Number.isFinite(minutes) && minutes > 0 ? minutes * 60 * 1000 : 0;
+}
+
+function latencyInterruptStatePath({ cwd, cycleId }) {
+  return path.join(cwd, ".research-lab", "runtime", `${cycleId}-supervisor-interrupt.json`);
+}
+
+// Whether a decision-latency interrupt may be raised now; records it when it is.
+function claimLatencyInterrupt({ cwd, cycleId, nowMs = Date.now(), env = process.env }) {
+  const statePath = latencyInterruptStatePath({ cwd, cycleId });
+  const cooldown = latencyInterruptCooldownMs(env);
+  const last = Date.parse(readJsonIfExists(statePath)?.raised_at || "");
+  if (cooldown > 0 && Number.isFinite(last) && nowMs - last < cooldown) {
+    return false;
+  }
+  try {
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(statePath, JSON.stringify({ raised_at: new Date(nowMs).toISOString() }, null, 2));
+  } catch {
+    // An unwritable state file must not stop the supervisor; it only loses the cooldown.
+  }
+  return true;
+}
+
 function sleepUntilIntervention({ cwd, cycleId, totalMs }) {
   let remaining = Math.max(0, Number(totalMs || 0));
   while (remaining > 0) {
@@ -895,7 +929,8 @@ function runResearch(argv, options = {}) {
     );
     if (
       stagnantRounds >= interruptStagnantThreshold &&
-      !gatePassed(summary)
+      !gatePassed(summary) &&
+      claimLatencyInterrupt({ cwd, cycleId: args.cycleId, env })
     ) {
       appendLabDirectorInterrupt({
         cwd,
@@ -982,6 +1017,7 @@ function runResearch(argv, options = {}) {
 module.exports = {
   runResearch,
   __private: {
+    claimLatencyInterrupt,
     executeResearchCycleWithMaintainer,
     refreshMalformedDerivedGateReview,
   },
