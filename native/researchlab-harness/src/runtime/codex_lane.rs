@@ -8,8 +8,8 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use super::agent_command::{
-    agent_command, agent_runtime, extract_claude_last_message, researchlab_codex_home,
-    resolve_agent_runtime, AgentRuntime,
+    agent_command, agent_runtime, append_claude_print_args, extract_claude_last_message,
+    researchlab_codex_home, resolve_agent_runtime, AgentRuntime,
 };
 use super::codex_outputs::{
     analyst_handoff_payload, chronicle_required_artifacts_present, extract_codex_last_message,
@@ -82,6 +82,19 @@ fn codex_idle_limit() -> Option<Duration> {
         .and_then(|value| value.trim().parse::<u64>().ok())
         .unwrap_or(900);
     (seconds > 0).then(|| Duration::from_secs(seconds))
+}
+
+/// Silence means a stall only for a runtime that streams. `claude -p
+/// --output-format json` prints its one result object when it finishes and
+/// nothing before, so every claude lane that worked past the idle limit was
+/// killed as stalled with its work and its tokens thrown away and no usage
+/// recorded: on one short cycle two scout lanes were killed at
+/// exactly 900 s, both mid-review. The role timeout still bounds them.
+fn idle_limit_for(runtime: AgentRuntime) -> Option<Duration> {
+    match runtime {
+        AgentRuntime::Codex => codex_idle_limit(),
+        AgentRuntime::Claude => None,
+    }
 }
 
 /// A tool call the agent started and has not finished. A long simulation or
@@ -467,7 +480,7 @@ fn wait_for_agent(
     check_windows_setup: bool,
 ) -> Result<ChildWatchOutcome> {
     let started = Instant::now();
-    let idle_limit = codex_idle_limit();
+    let idle_limit = idle_limit_for(agent_runtime());
     let mut last_stdout_len = 0u64;
     let mut last_output_at = Instant::now();
     loop {
@@ -1809,21 +1822,7 @@ fn run_chronicle_continuation_attempt(
             );
         }
         AgentRuntime::Claude => {
-            let claude_model = assigned_model.filter(|model| {
-                let lower = model.to_ascii_lowercase();
-                matches!(lower.as_str(), "sonnet" | "opus" | "haiku")
-                    || lower.starts_with("claude-")
-            });
-            builder
-                .arg("-p")
-                .arg("--output-format")
-                .arg("json")
-                .arg("--dangerously-skip-permissions")
-                .args(if let Some(model) = claude_model {
-                    vec!["--model".to_string(), model.to_string()]
-                } else {
-                    Vec::new()
-                });
+            append_claude_print_args(&mut builder, assigned_model, &contract.role);
         }
     }
     apply_cli_environment(&mut builder);
@@ -2097,25 +2096,7 @@ pub(crate) fn run_codex_agent_lane(
             // Claude CLI: -p (print/non-interactive), --output-format json gives
             // a single JSON object with "result" containing the final message.
             // --dangerously-skip-permissions matches the codex bypass behavior.
-            // Only forward --model when the catalog assigned a claude-shaped
-            // model id (alias like "sonnet"/"opus"/"haiku" or a "claude-..." id).
-            // Codex-shaped ids ("gpt-5.x", "codex-...") would be rejected by
-            // claude, so we let the CLI pick its default in that case.
-            let claude_model = assigned_model.filter(|model| {
-                let lower = model.to_ascii_lowercase();
-                matches!(lower.as_str(), "sonnet" | "opus" | "haiku")
-                    || lower.starts_with("claude-")
-            });
-            command_builder
-                .arg("-p")
-                .arg("--output-format")
-                .arg("json")
-                .arg("--dangerously-skip-permissions")
-                .args(if let Some(model) = claude_model {
-                    vec!["--model".to_string(), model.to_string()]
-                } else {
-                    Vec::new()
-                });
+            append_claude_print_args(&mut command_builder, assigned_model, &contract.role);
             // No equivalent of codex --output-last-message; we extract from stdout.
         }
     };
@@ -2365,21 +2346,7 @@ pub(crate) fn run_codex_agent_lane(
                 );
             }
             AgentRuntime::Claude => {
-                let claude_model = retry_model.filter(|model| {
-                    let lower = model.to_ascii_lowercase();
-                    matches!(lower.as_str(), "sonnet" | "opus" | "haiku")
-                        || lower.starts_with("claude-")
-                });
-                retry_builder
-                    .arg("-p")
-                    .arg("--output-format")
-                    .arg("json")
-                    .arg("--dangerously-skip-permissions")
-                    .args(if let Some(model) = claude_model {
-                        vec!["--model".to_string(), model.to_string()]
-                    } else {
-                        Vec::new()
-                    });
+                append_claude_print_args(&mut retry_builder, retry_model, &contract.role);
             }
         }
         let mut retry_stdin_path = retry_prompt_path.clone();
@@ -3025,6 +2992,11 @@ pub(crate) fn run_codex_agent_lane(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_claude_lane_is_not_killed_for_printing_nothing_until_it_finishes() {
+        assert!(super::idle_limit_for(super::AgentRuntime::Claude).is_none());
+    }
+
     use super::should_enforce_literature_completion;
 
     #[test]

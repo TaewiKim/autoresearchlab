@@ -707,6 +707,11 @@ pub(crate) fn codex_failure_category(
         || combined.contains("quota_exceeded")
         || combined.contains("exceeded your current quota")
         || combined.contains("usage limit")
+        // The claude runtime's own field. Its message reads "You've hit your
+        // 5-hour limit", with no "usage limit" in it, so on
+        // one long claude-runtime cycle 3,663 lanes launched into the limit were filed
+        // as failed, aborted or even completed, and the cycle never paused.
+        || combined.contains("\"api_error\":\"usage_limit_reached\"")
         || combined.contains("billing_hard_limit_reached")
     {
         return Some("quota_exceeded");
