@@ -407,6 +407,12 @@ fn the_ordered_experiment_gets_its_own_budget() {
         ),
         7_200
     );
+    // The provisioning engineer runs the GPU work; an audit stays a short errand.
+    assert_eq!(
+        codex_timeout_seconds(&contract, Some(&json!({"action_type": crate::labdirector::work_orders::CAPABILITY_PROVISIONING_ACTION}))),
+        3_600
+    );
+    assert_eq!(codex_timeout_seconds(&contract, Some(&json!({"action_type": "runner_execution_audit_followup"}))), 900);
 }
 
 #[test]

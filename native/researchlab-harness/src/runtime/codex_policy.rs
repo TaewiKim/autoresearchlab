@@ -431,6 +431,16 @@ pub(crate) fn codex_timeout_seconds(contract: &LaneContract, role_plan: Option<&
     if role_plan_action_type(role_plan) == crate::labdirector::SIMULATION_DATA_GENERATION_ACTION {
         return env_seconds("RESEARCHLAB_SIMULATION_TIMEOUT_SECONDS", 7_200);
     }
+    // A provisioning engineer is where GPU work runs (runtime::gpu_jobs), and a
+    // GPU job lives only while its lane does.
+    //
+    // MEASURED ON cycle-a-20260919, 2026-11-18: followup-engineer-1271 was
+    // ordered to resume the Push-T release evaluation (450 episodes of about 45 s
+    // left) under the engineer default of 900 s. It ran six 150-second batches
+    // through the broker and was killed in the seventh, with no final report.
+    if contract.role == "engineer" && role_plan_action_type(role_plan) == crate::labdirector::work_orders::CAPABILITY_PROVISIONING_ACTION {
+        return env_seconds("RESEARCHLAB_ENGINEER_PROVISIONING_TIMEOUT_SECONDS", 3_600);
+    }
     env::var("RESEARCHLAB_CODEX_TIMEOUT_SECONDS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
