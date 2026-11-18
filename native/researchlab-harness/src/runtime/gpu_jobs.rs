@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -415,6 +415,23 @@ fn tail_of(path: &Path, max_bytes: usize) -> String {
     text[start..].to_string()
 }
 
+fn collect_job(child: &mut Child, timeout: Duration, cancel: Option<&AtomicBool>) -> Result<(&'static str, Option<i32>)> {
+    let started = Instant::now();
+    loop {
+        if let Some(exit) = child.try_wait()? {
+            return Ok((if exit.success() { "completed" } else { "failed" }, exit.code()));
+        }
+        let cancelled = cancel.is_some_and(|flag| flag.load(Ordering::Relaxed));
+        if cancelled || started.elapsed() >= timeout {
+            // Killing bwrap takes its pid namespace, and so every process of the job.
+            child.kill()?;
+            child.wait()?;
+            return Ok((if cancelled { "cancelled" } else { "timeout" }, None));
+        }
+        std::thread::sleep(timeout.saturating_sub(started.elapsed()).min(Duration::from_millis(100)));
+    }
+}
+
 /// Run the request at `request_path` and write its result beside it.
 pub(crate) fn run_gpu_job_request(
     paths: &AppPaths,
@@ -497,16 +514,7 @@ pub(crate) fn run_gpu_job_request(
         Ok(child) => child,
         Err(error) => return finish(json!({"status": "failed", "error": format!("the sandbox could not be started: {error}"), "argv": spec.argv})),
     };
-    let waited = child.wait_timeout(Duration::from_secs(spec.timeout_seconds))?;
-    let (status, exit_code) = match waited {
-        Some(exit) => (if exit.success() { "completed" } else { "failed" }, exit.code()),
-        None => {
-            // Killing bwrap takes its pid namespace, and so every process of the job.
-            let _ = child.kill();
-            let _ = child.wait();
-            ("timeout", None)
-        }
-    };
+    let (status, exit_code) = collect_job(&mut child, Duration::from_secs(spec.timeout_seconds), cancel)?;
     finish(json!({
         "status": status,
         "exit_code": exit_code,
@@ -603,12 +611,12 @@ impl GpuJobBroker {
 impl Drop for GpuJobBroker {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        // A job in flight belongs to a lane that has ended; it dies with this
-        // process (--die-with-parent). Do not hold the lane's exit for it.
+        // MEASURED ON cycle-a-20260919, 2026-11-16: engineer 1265
+        // exited with cycle-5e8c99-20261115T030955-2 running. Detaching this thread let
+        // process exit kill the sandbox before its terminal receipt and ledger
+        // entry were written. Cancel, reap and record before the lane exits.
         if let Some(handle) = self.handle.take() {
-            if handle.is_finished() {
-                let _ = handle.join();
-            }
+            let _ = handle.join();
         }
     }
 }
@@ -616,6 +624,65 @@ impl Drop for GpuJobBroker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // MEASURED ON cycle-a-20260919, 2026-11-16: engineer 1265
+    // returned while its 14400-second job was running; process exit lost both
+    // the terminal receipt and accounting entry. Exercise shutdown on a CPU
+    // child without requiring a GPU or weakening the production sandbox.
+    #[cfg(unix)]
+    #[test]
+    fn lane_shutdown_collects_the_running_job_before_returning() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let paths = AppPaths {
+            project_root: temp.path().to_path_buf(),
+            runtime_root: temp.path().join(".research-lab"),
+            data_root: temp.path().join("data"),
+            stats_driver_script: PathBuf::new(),
+            literature_driver_script: PathBuf::new(),
+        };
+        let job_dir = gpu_job_dir(&paths, "gpu", "engineer-1265");
+        fs::create_dir_all(&job_dir).unwrap();
+        let receipt = job_dir.join("anchor.result.json");
+        let worker_receipt = receipt.clone();
+        let worker_paths = paths.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let (ready, running) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+            ready.send(()).unwrap();
+            let (status, exit_code) = collect_job(&mut child, Duration::from_secs(14400), Some(&worker_stop)).unwrap();
+            assert!(child.try_wait().unwrap().is_some(), "the worker was reaped");
+            let result = json!({"job_id": "anchor", "status": status, "exit_code": exit_code});
+            write_json(&worker_receipt, &result).unwrap();
+            append_ledger(&worker_paths, "gpu", &result);
+        });
+        let broker = GpuJobBroker { stop, handle: Some(handle) };
+        running.recv_timeout(Duration::from_secs(5)).unwrap();
+        let started = Instant::now();
+        drop(broker);
+        assert!(started.elapsed() < Duration::from_secs(5), "shutdown must cancel, not wait for the job's timeout");
+        assert_eq!(read_json(&receipt).unwrap()["status"], "cancelled");
+        let ledger = fs::read_to_string(gpu_job_ledger_path(&paths, "gpu")).unwrap();
+        assert_eq!(ledger.lines().count(), 1);
+        assert_eq!(serde_json::from_str::<Value>(ledger.trim()).unwrap()["status"], "cancelled");
+    }
+
+    // MEASURED ON cycle-a-20260919, 2026-11-16: collecting a job
+    // at lane shutdown must retain ordinary exit and timeout outcomes too.
+    #[cfg(unix)]
+    #[test]
+    fn collecting_jobs_preserves_success_failure_and_timeout() {
+        for (program, args, timeout, expected) in [
+            ("/bin/true", vec![], Duration::from_secs(5), ("completed", Some(0))),
+            ("/bin/false", vec![], Duration::from_secs(5), ("failed", Some(1))),
+            ("/bin/sleep", vec!["30"], Duration::from_millis(20), ("timeout", None)),
+        ] {
+            let mut child = Command::new(program).args(args).spawn().unwrap();
+            assert_eq!(collect_job(&mut child, timeout, None).unwrap(), expected);
+            assert!(child.try_wait().unwrap().is_some());
+        }
+    }
 
     fn existing_program() -> String {
         std::env::current_exe().unwrap().display().to_string()

@@ -243,6 +243,56 @@ const BLOCKER_OWNERS: &[(&str, Option<&str>, &str)] = &[
     ),
 ];
 
+/// A lane that is pending on disk and will never run: the scheduler holds it on a
+/// blocker nothing clears (`DependencyBlocker::is_permanently_closed`).
+///
+/// Such a lane stays `pending` by design, so a check of "is a lane already open
+/// for this?" that reads status alone is answered yes for ever by a lane the
+/// scheduler has already said it will not run. MEASURED ON cycle-a-
+/// 20260919: director 1939 (2026-11-11/12, twelve hours) and director 2010
+/// (2026-11-16 03:19 to 11-18, two days) were each closed as
+/// `blocked-by-completed-labdirector-requery` while still `pending`, and every
+/// supervisor interrupt in between was skipped as "existing" against them -- the
+/// cycle sat with no lane running and no director asked.
+///
+/// Read from what the scheduler recorded for the lane in its latest pass, and
+/// from the gate itself when that record does not name the lane.
+pub(crate) fn lane_closed_for_good(paths: &AppPaths, cycle_id: &str, lane_id: &str) -> bool {
+    let lane_dir = lane_root(paths, cycle_id, lane_id);
+    let terminal = read_json(&lane_dir.join("final-status.json"))
+        .ok()
+        .and_then(|status| status.get("status").and_then(Value::as_str).map(str::to_string))
+        .is_some_and(|status| matches!(status.as_str(), "completed" | "failed" | "aborted" | "cancelled"));
+    if terminal || lane_process_is_alive(paths, cycle_id, lane_id) {
+        return false;
+    }
+    let summary = read_json(&plans_root(paths).join(format!("{cycle_id}-run-summary.json"))).ok();
+    let recorded = summary
+        .as_ref()
+        .and_then(|summary| summary.get("pass_summaries").and_then(Value::as_array))
+        .and_then(|passes| passes.last())
+        .and_then(|pass| pass.get("skipped").and_then(Value::as_array))
+        .and_then(|skipped| {
+            skipped
+                .iter()
+                .find(|item| item.get("lane_id").and_then(Value::as_str) == Some(lane_id))
+                .and_then(|item| item.get("reason").and_then(Value::as_str).map(str::to_string))
+        });
+    if let Some(reason) = recorded {
+        return DependencyBlocker::describe(reason).is_permanently_closed();
+    }
+    let Some(contract) = read_json(&lane_dir.join("lane-contract.json"))
+        .ok()
+        .and_then(|value| serde_json::from_value::<LaneContract>(value).ok())
+    else {
+        return false;
+    };
+    super::dependency_blocker_for_lane(paths, cycle_id, &contract)
+        .ok()
+        .flatten()
+        .is_some_and(|reason| DependencyBlocker::describe(reason).is_permanently_closed())
+}
+
 /// Longest prefix wins, so `waiting-for-chronicle-graphs` is never read as
 /// `waiting-for-chronicle`. Sorting by length rather than relying on table order
 /// is deliberate: a table whose correctness depends on the order entries happen

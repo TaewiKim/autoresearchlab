@@ -525,8 +525,9 @@ pub(crate) fn parse_codex_config_overrides(raw: Option<&str>) -> Vec<String> {
 /// OWNER DECISION 2026-11-12: run Codex in fast mode. MEASURED the same day in the
 /// cycle's container (codex-cli 0.166.0): nothing set a tier, so every lane ran
 /// with the `service_tier = "default"` of the container's own config; `fast` and
-/// `priority` are accepted for all four models the lanes use (gpt-6-astra,
-/// gpt-6.1-terra, gpt-6.1-sol, gpt-6-luna), `flex` is refused by the API with a
+/// `priority` are accepted for all four models the lanes used then (gpt-6-astra,
+/// gpt-6.1-terra, gpt-6.1-sol, gpt-6-luna) and, measured 2026-11-18, for gpt-6.2-astra
+/// and gpt-6.2-sol, which replaced 6-astra and 6.1-sol; `flex` is refused by the API with a
 /// 400 that fails the turn, and an unknown name is dropped by the CLI with an
 /// error item in the lane's stream. So only the names known to work are passed.
 /// Fast mode spends the subscription's credits faster; that is the owner's trade.

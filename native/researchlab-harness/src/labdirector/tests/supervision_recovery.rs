@@ -1263,3 +1263,56 @@ fn a_runner_stalled_past_the_grace_is_reclaimed() {
     let actions = supervise_cycle(&paths, cycle, 2, 1800).unwrap();
     assert!(runner_was_superseded(&actions, &runner));
 }
+
+
+// MEASURED ON cycle-a-20260919: director 2010 stayed `pending` after the
+// scheduler closed it for good, and two days of supervisor interrupts were skipped
+// as "existing" against it.
+#[test]
+fn a_lane_the_scheduler_closed_for_good_does_not_stand_in_for_a_new_director() {
+    let tmp = TempDir::new().unwrap();
+    let paths = build_paths(tmp.path());
+    let cycle = "cycle-closed-for-good";
+    let inbox_path = labdirector_inbox_path(&paths, cycle);
+    fs::create_dir_all(inbox_path.parent().unwrap()).unwrap();
+    fs::create_dir_all(plans_root(&paths)).unwrap();
+    let interrupt = |pass: u32| {
+        json!({
+            "ts": "2026-11-18T02:57:31Z",
+            "type": "supervisor_instruction",
+            "payload": {
+                "issue_code": "supervisor_decision_latency_interrupt",
+                "severity": "process_latency",
+                "message": format!("Process latency anomaly at pass {pass}: LabDirector must author a decisive next move."),
+                "requested_action": {"supervisor_scope": "process_escalation_only", "lab_director_must_author_research_instruction": true}
+            }
+        })
+    };
+    let mut lines = vec![serde_json::to_string(&interrupt(1)).unwrap()];
+    fs::write(&inbox_path, format!("{}\n", lines.join("\n"))).unwrap();
+    let first = review_labdirector_inbox(&paths, cycle).unwrap().unwrap();
+    let spawned = first["spawned_supervisor_instruction_lanes"].as_array().cloned().unwrap_or_default();
+    assert_eq!(spawned.len(), 1);
+    let first_lane = spawned[0]["lane_id"].as_str().unwrap().to_string();
+
+    // While that lane can still run, the next interrupt waits for it.
+    lines.push(serde_json::to_string(&interrupt(2)).unwrap());
+    fs::write(&inbox_path, format!("{}\n", lines.join("\n"))).unwrap();
+    let waiting = review_labdirector_inbox(&paths, cycle).unwrap().unwrap();
+    assert!(waiting["spawned_supervisor_instruction_lanes"].as_array().map_or(true, |lanes| lanes.is_empty()));
+
+    // The scheduler then closes it for good, and it stays pending on disk.
+    write_json(
+        &plans_root(&paths).join(format!("{cycle}-run-summary.json")),
+        &json!({"pass_summaries": [{"pass": 8, "skipped": [
+            {"lane_id": first_lane, "reason": "blocked-by-completed-labdirector-requery duplicate_requery=true"}
+        ]}]}),
+    )
+    .unwrap();
+    lines.push(serde_json::to_string(&interrupt(3)).unwrap());
+    fs::write(&inbox_path, format!("{}\n", lines.join("\n"))).unwrap();
+    let next = review_labdirector_inbox(&paths, cycle).unwrap().unwrap();
+    let spawned = next["spawned_supervisor_instruction_lanes"].as_array().cloned().unwrap_or_default();
+    assert_eq!(spawned.len(), 1, "the interrupt was skipped against a lane that will never run: {next}");
+    assert_ne!(spawned[0]["lane_id"].as_str().unwrap(), first_lane);
+}

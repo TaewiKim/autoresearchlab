@@ -10,11 +10,16 @@ use std::env;
 // supervisor's runtime-created followup lanes ship the same provider as
 // the JS-side initial agent plan (codex catalogue vs claude catalogue).
 // These MUST stay in sync with src/agents/lab_director/agent_plan.js.
-pub(crate) const CODEX_LAB_DIRECTOR_MODEL: &str = "gpt-6.1-sol";
-pub(crate) const CODEX_DEFAULT_AGENT_MODEL: &str = "gpt-6.1-sol";
-pub(crate) const CODEX_ANALYST_MODEL: &str = "gpt-6.1-sol";
+// OWNER DECISION 2026-11-18: GPT-6.2 Sol and GPT-6.2 Astra replace 6.1 Sol and 6
+// Astra. MEASURED the same day: both answer through the cycle container's Codex
+// login (codex-cli 0.166.0) with service_tier="fast". Terra and Luna are unchanged.
+pub(crate) const CODEX_LAB_DIRECTOR_MODEL: &str = "gpt-6.2-sol";
+pub(crate) const CODEX_DEFAULT_AGENT_MODEL: &str = "gpt-6.2-sol";
+pub(crate) const CODEX_ANALYST_MODEL: &str = "gpt-6.2-sol";
 pub(crate) const CODEX_LAB_RUNNER_MODEL: &str = "gpt-6.1-terra";
-pub(crate) const CODEX_ASTRA_MODEL: &str = "gpt-6-astra";
+pub(crate) const CODEX_ASTRA_MODEL: &str = "gpt-6.2-astra";
+/// Astra ids routes were written with, so the per-cycle Astra budget counts them.
+pub(crate) const CODEX_ASTRA_MODELS: &[&str] = &["gpt-6.2-astra", "gpt-6-astra"];
 pub(crate) const CODEX_TERRA_MODEL: &str = "gpt-6.1-terra";
 pub(crate) const CODEX_LUNA_MODEL: &str = "gpt-6-luna";
 

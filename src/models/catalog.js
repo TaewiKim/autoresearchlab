@@ -21,7 +21,7 @@ function codexCatalog() {
     updated_at: new Date().toISOString(),
     models: [
       {
-        id: "gpt-6-astra",
+        id: "gpt-6.2-astra",
         family: "gpt-6",
         tier: "frontier-adjudication",
         strengths: ["novelty synthesis", "hypothesis tournament", "decisive scientific adjudication"],
@@ -30,7 +30,7 @@ function codexCatalog() {
         token_policy: "use-at-most-two-decisive-routes-per-cycle",
       },
       {
-        id: "gpt-6.1-sol",
+        id: "gpt-6.2-sol",
         family: "gpt-6",
         tier: "frontier",
         strengths: ["planning", "synthesis", "complex reasoning", "final review"],

@@ -7,16 +7,35 @@ const { RESEARCH_API_MODEL, usesDirectModelApi } = require("./research_api");
 // same contract without making the legacy `assigned_model` field ambiguous.
 const ROUTE_VERSION = "codex-tier-router-v2";
 
-const CODEX_MODELS = Object.freeze([
+// The routing ladder, cheapest first. OWNER DECISION 2026-11-18: GPT-6.2 Sol and
+// GPT-6.2 Astra replace 6.1 Sol and 6 Astra (both measured answering through the
+// container's Codex login that day); Terra and Luna are unchanged.
+const CODEX_LADDER = Object.freeze([
   "gpt-6-luna",
   "gpt-6.1-terra",
-  "gpt-6.1-sol",
-  "gpt-6-astra",
-  // Still accepted so a role plan persisted before 2026-10-31 stays routable.
-  "gpt-5.6-luna",
-  "gpt-5.6-terra",
-  "gpt-5.6-sol",
+  "gpt-6.2-sol",
+  "gpt-6.2-astra",
 ]);
+
+// Still accepted as pins so a role plan written before a model change stays
+// routable: 6.1 Sol and 6 Astra until 2026-11-18, the 5.6 ids until 2026-10-31.
+// Each sits on the ladder rung of its successor. Kept off the ladder itself:
+// promotion from the top used to step into this tail (Astra -> 5.6 Luna).
+const LEGACY_CODEX_MODELS = Object.freeze({
+  "gpt-6.1-sol": "gpt-6.2-sol",
+  "gpt-6-astra": "gpt-6.2-astra",
+  "gpt-5.6-luna": "gpt-6-luna",
+  "gpt-5.6-terra": "gpt-6.1-terra",
+  "gpt-5.6-sol": "gpt-6.2-sol",
+});
+
+const CODEX_MODELS = Object.freeze([...CODEX_LADDER, ...Object.keys(LEGACY_CODEX_MODELS)]);
+
+const ASTRA_MODELS = Object.freeze(["gpt-6.2-astra", "gpt-6-astra"]);
+
+function rung(model) {
+  return CODEX_LADDER.indexOf(LEGACY_CODEX_MODELS[model] || model);
+}
 
 const NON_CODEX_RUNTIME_MODELS = Object.freeze({
   "external-driver": "python-external-driver",
@@ -70,20 +89,18 @@ function route({ model, reasoningEffort, reasons, fallbackChain }) {
 }
 
 function effortFor(model) {
-  if (model === "gpt-6-astra") return "xhigh";
-  if (model === "gpt-6.1-sol" || model === "gpt-5.6-sol") return "high";
-  if (model === "gpt-6.1-terra" || model === "gpt-5.6-terra") return "medium";
-  return "low";
+  const effort = { 3: "xhigh", 2: "high", 1: "medium" }[rung(model)];
+  return effort || "low";
 }
 
 function promote(model) {
-  const index = CODEX_MODELS.indexOf(model);
-  return CODEX_MODELS[Math.min(index + 1, CODEX_MODELS.length - 1)] || model;
+  const index = rung(model);
+  return index < 0 ? model : CODEX_LADDER[Math.min(index + 1, CODEX_LADDER.length - 1)];
 }
 
 function demote(model) {
-  const index = CODEX_MODELS.indexOf(model);
-  return CODEX_MODELS[Math.max(index - 1, 0)] || model;
+  const index = rung(model);
+  return index < 0 ? model : CODEX_LADDER[Math.max(index - 1, 0)];
 }
 
 function isCandidateSynthesis({ role, actionType, prompt, candidateCount, scientificStakes }) {
@@ -107,17 +124,17 @@ function baseModelFor({ role, complexity, actionType }) {
   const action = text(actionType);
   if (role === "lab-director") {
     return complexity >= 4 || /hypothesis|pivot|novelty|gate/.test(action)
-      ? "gpt-6.1-sol"
+      ? "gpt-6.2-sol"
       : "gpt-6.1-terra";
   }
   if (role === "analyst") {
     return complexity >= 4 || /falsif|confound|recovery|comparison/.test(action)
-      ? "gpt-6.1-sol"
+      ? "gpt-6.2-sol"
       : "gpt-6.1-terra";
   }
   if (role === "gatekeeper") {
     return complexity >= 4 || /technical|reproduc|novelty|falsif/.test(action)
-      ? "gpt-6.1-sol"
+      ? "gpt-6.2-sol"
       : "gpt-6.1-terra";
   }
   if (role === "lab-runner") return "gpt-6.1-terra";
@@ -196,7 +213,7 @@ function chooseModelRoute(input = {}) {
     reasons.push("long prompt avoids the lightweight route");
   }
   if (lengthBand === "long" && model === "gpt-6.1-terra" && complexity >= 4) {
-    model = "gpt-6.1-sol";
+    model = "gpt-6.2-sol";
     reasons.push("long complex prompt needs deeper synthesis");
   }
 
@@ -213,7 +230,7 @@ function chooseModelRoute(input = {}) {
     adjudicationRequired: input.adjudicationRequired || input.adjudication_required,
   });
   if (astraEligible && complexity >= 4) {
-    model = "gpt-6-astra";
+    model = "gpt-6.2-astra";
     reasons.push("reserved Astra route for candidate synthesis or decisive adjudication");
   }
 
@@ -221,7 +238,7 @@ function chooseModelRoute(input = {}) {
   // a model-quality failure. Repair/compact those without buying a higher tier.
   if (retryCount >= 2 && /invalid_structured_output|schema_response_invalid|schema_validation_failed/.test(failureCategory)) {
     const upgraded = promote(model);
-    if (upgraded !== "gpt-6-astra" || astraEligible) {
+    if (upgraded !== "gpt-6.2-astra" || astraEligible) {
       model = upgraded;
       reasons.push(`retry ${retryCount} after ${failureCategory || "structured failure"}`);
     }
@@ -234,10 +251,10 @@ function chooseModelRoute(input = {}) {
     reasons.push(`availability fallback after ${failureCategory}`);
   }
 
-  const fallbackChain = CODEX_MODELS
+  const fallbackChain = CODEX_LADDER
     .filter((candidate) => candidate !== model)
-    .filter((candidate) => candidate !== "gpt-6-astra" || astraEligible)
-    .filter((candidate) => CODEX_MODELS.indexOf(candidate) < CODEX_MODELS.indexOf(model))
+    .filter((candidate) => !ASTRA_MODELS.includes(candidate) || astraEligible)
+    .filter((candidate) => CODEX_LADDER.indexOf(candidate) < rung(model))
     .reverse();
   return route({
     model,
@@ -249,6 +266,7 @@ function chooseModelRoute(input = {}) {
 
 module.exports = {
   ROUTE_VERSION,
+  CODEX_LADDER,
   CODEX_MODELS,
   NON_CODEX_RUNTIME_MODELS,
   chooseModelRoute,

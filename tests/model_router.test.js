@@ -4,15 +4,15 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { codexCatalog } = require("../src/models/catalog");
-const { chooseModelRoute, ROUTE_VERSION } = require("../src/policy/model_router");
+const { CODEX_LADDER, chooseModelRoute, ROUTE_VERSION } = require("../src/policy/model_router");
 const { buildDynamicAgentPlan } = require("../src/agents/lab_director/agent_plan");
 const { buildRolePlan } = require("../src/agents");
 
 test("catalog lists the four current Codex routing tiers", () => {
   const ids = codexCatalog().models.map((model) => model.id);
   assert.deepEqual(ids.slice(0, 4), [
-    "gpt-6-astra",
-    "gpt-6.1-sol",
+    "gpt-6.2-astra",
+    "gpt-6.2-sol",
     "gpt-6.1-terra",
     "gpt-6-luna",
   ]);
@@ -27,7 +27,7 @@ test("router assigns routine and complex work to the appropriate cost tier", () 
   }).model, "gpt-6.1-terra");
   assert.equal(chooseModelRoute({
     role: "analyst", runtimeClass: "codex-agent", complexityScore: 5, actionType: "falsification_comparison",
-  }).model, "gpt-6.1-sol");
+  }).model, "gpt-6.2-sol");
 });
 
 test("router reserves Astra for candidate synthesis and decisive adjudication", () => {
@@ -38,14 +38,14 @@ test("router reserves Astra for candidate synthesis and decisive adjudication", 
     actionType: "hypothesis_tournament",
     candidateCount: 3,
   });
-  assert.equal(synthesis.model, "gpt-6-astra");
+  assert.equal(synthesis.model, "gpt-6.2-astra");
   assert.equal(synthesis.reasoning_effort, "xhigh");
   assert.match(synthesis.route_reason, /reserved Astra/i);
 
   const ordinaryReview = chooseModelRoute({
     role: "gatekeeper", runtimeClass: "codex-agent", complexityScore: 5, actionType: "technical_review",
   });
-  assert.equal(ordinaryReview.model, "gpt-6.1-sol");
+  assert.equal(ordinaryReview.model, "gpt-6.2-sol");
 
   const decisiveReview = chooseModelRoute({
     role: "gatekeeper",
@@ -54,20 +54,20 @@ test("router reserves Astra for candidate synthesis and decisive adjudication", 
     actionType: "novelty_adjudication",
     scientificStakes: "decisive",
   });
-  assert.equal(decisiveReview.model, "gpt-6-astra");
+  assert.equal(decisiveReview.model, "gpt-6.2-astra");
 });
 
 test("router respects pins, retries, availability fallback, and driver bypass", () => {
   const pinned = chooseModelRoute({
-    role: "scout", runtimeClass: "codex-agent", modelPin: "gpt-6.1-sol",
+    role: "scout", runtimeClass: "codex-agent", modelPin: "gpt-6.2-sol",
   });
-  assert.equal(pinned.model, "gpt-6.1-sol");
+  assert.equal(pinned.model, "gpt-6.2-sol");
   assert.match(pinned.route_reason, /explicit model pin/i);
 
   const retry = chooseModelRoute({
     role: "analyst", runtimeClass: "codex-agent", retryCount: 2, failureCategory: "invalid_structured_output",
   });
-  assert.equal(retry.model, "gpt-6.1-sol");
+  assert.equal(retry.model, "gpt-6.2-sol");
 
   const quotaFallback = chooseModelRoute({
     role: "lab-director",
@@ -77,7 +77,7 @@ test("router respects pins, retries, availability fallback, and driver bypass", 
     candidateCount: 3,
     failureCategory: "quota_exceeded",
   });
-  assert.equal(quotaFallback.model, "gpt-6.1-sol");
+  assert.equal(quotaFallback.model, "gpt-6.2-sol");
 
   const driver = chooseModelRoute({
     role: "lab-runner", runtimeClass: "external-driver", laneMode: "driver-exec",
@@ -96,7 +96,7 @@ test("agent and role plans retain assigned_model alongside model_route", () => {
   const director = plan.agents.find((agent) => agent.role === "lab-director");
   const chronicle = plan.agents.find((agent) => agent.role === "chronicle");
   const runner = plan.agents.find((agent) => agent.role === "lab-runner");
-  assert.equal(director.model, "gpt-6-astra");
+  assert.equal(director.model, "gpt-6.2-astra");
   assert.equal(director.model_route.route_version, ROUTE_VERSION);
   assert.equal(chronicle.model, "gpt-6.1-terra");
   assert.equal(runner.model, "python-external-driver");
@@ -126,7 +126,7 @@ test("pins never authorize an automatic model change on long or failed work", ()
   assert.throws(() => chooseModelRoute({ modelPin: "unverified-model" }), /unsupported Codex model pin/);
   const plan = buildRolePlan({ prompt: "Summarize new evidence.", cycleId: "pin-update",
     lane: { lane_id: "chronicle-01", role: "chronicle", runtime_class: "codex-agent",
-      model_pin: "gpt-6-luna", model_route: { model: "gpt-6-astra", reasoning_effort: "xhigh" } } });
+      model_pin: "gpt-6-luna", model_route: { model: "gpt-6.2-astra", reasoning_effort: "xhigh" } } });
   assert.equal(plan.assigned_model, "gpt-6-luna");
   assert.deepEqual(plan.model_route.fallback_chain, []);
 });
@@ -137,7 +137,7 @@ test("runtime failures preserve the tier while response-quality failures may esc
       failureCategory }).model, "gpt-6.1-terra", failureCategory);
   }
   assert.equal(chooseModelRoute({ role: "analyst", complexityScore: 2, retryCount: 2,
-    failureCategory: "invalid_structured_output" }).model, "gpt-6.1-sol");
+    failureCategory: "invalid_structured_output" }).model, "gpt-6.2-sol");
 });
 
 test("long evidence and candidate inventories do not imply a hard synthesis task", () => {
@@ -150,6 +150,17 @@ test("long evidence and candidate inventories do not imply a hard synthesis task
   }
   const inventory = chooseModelRoute({ role: "lab-director", complexityScore: 5,
     actionType: "status_digest", candidateCount: 20 });
-  assert.equal(inventory.model, "gpt-6.1-sol");
-  assert.ok(!inventory.fallback_chain.includes("gpt-6-astra"));
+  assert.equal(inventory.model, "gpt-6.2-sol");
+  assert.ok(!inventory.fallback_chain.includes("gpt-6.2-astra"));
+});
+
+// OWNER DECISION 2026-11-18: 6.2 Sol and 6.2 Astra on the ladder; the ids they
+// replaced stay valid pins, routed on their successor's rung.
+test("the replaced Sol and Astra ids remain valid pins on their successor's rung", () => {
+  for (const [legacy, effort] of [["gpt-6.1-sol", "high"], ["gpt-6-astra", "xhigh"], ["gpt-5.6-sol", "high"]]) {
+    const pinned = chooseModelRoute({ role: "lab-director", runtimeClass: "codex-agent", modelPin: legacy });
+    assert.equal(pinned.model, legacy);
+    assert.equal(pinned.reasoning_effort, effort, legacy);
+  }
+  assert.deepEqual(CODEX_LADDER, ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.2-sol", "gpt-6.2-astra"]);
 });

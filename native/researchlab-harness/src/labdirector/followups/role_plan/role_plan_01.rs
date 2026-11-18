@@ -580,7 +580,7 @@ fn prior_astra_route_count(paths: &AppPaths, cycle_id: &str) -> usize {
             plan.get("model_route")
                 .and_then(|route| route.get("model"))
                 .and_then(Value::as_str)
-                == Some("gpt-6-astra")
+                .is_some_and(|model| crate::labdirector::policy::CODEX_ASTRA_MODELS.contains(&model))
         })
         .count()
 }

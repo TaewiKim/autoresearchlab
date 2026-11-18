@@ -159,7 +159,7 @@ pub(crate) fn open_followup_action_from_source_lane(
                 || legacy_source_brief_id
                     .map(|legacy| role_plan.source_brief_id.as_deref() == Some(legacy))
                     .unwrap_or(false);
-            if source_matches {
+            if source_matches && !lane_closed_for_good(paths, cycle_id, lane_id) {
                 return Ok(Some(lane_id.to_string()));
             }
         }
@@ -196,6 +196,9 @@ pub(crate) fn open_followup_action_from_source_lane(
             ) {
                 continue;
             }
+        }
+        if lane_closed_for_good(paths, cycle_id, &lane_id) {
+            continue;
         }
         return Ok(Some(lane_id));
     }
