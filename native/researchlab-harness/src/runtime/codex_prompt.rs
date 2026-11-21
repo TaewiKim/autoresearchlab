@@ -141,6 +141,83 @@ fn runtime_environment_clause() -> String {
     )
 }
 
+/// A JSON value on one line, with a space after each separator.
+fn inline_json(value: &Value) -> String {
+    match value {
+        Value::Object(map) => format!(
+            "{{{}}}",
+            map.iter()
+                .map(|(key, child)| format!("{}: {}", Value::String(key.clone()), inline_json(child)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Array(items) => format!("[{}]", items.iter().map(inline_json).collect::<Vec<_>>().join(", ")),
+        other => other.to_string(),
+    }
+}
+
+/// The blocks of `planner_metadata` that hold across decisions, in reading order.
+const DURABLE_CONTEXT_FIRST: [&str; 5] = ["owner_direction", "commitments", "decision_memory", "work_orders", "research_clues"];
+
+/// The role plan as the prompt carries it: still JSON, one line per top-level
+/// key and per `planner_metadata` key, the durable blocks first.
+///
+/// MEASURED ON cycle-a-20260919, 2026-11-21: a director prompt was
+/// 290 KB, of which 41 KB was the indentation of pretty-printed JSON -- bytes
+/// that say nothing. Length alone lowers reliability (Chroma, "Context Rot",
+/// 2025; LongMemEval: GPT-4o 0.870 on the relevant sessions against 0.606 on the
+/// 115k-token history), so what can be cut without losing a fact is cut first.
+/// The order follows the same evidence about position: what must hold across
+/// decisions is read before the volatile digest.
+pub(crate) fn render_role_plan(value: &Value) -> String {
+    let Value::Object(map) = value else {
+        return inline_json(value);
+    };
+    let entry = |key: &str, child: &Value| format!("{}: {}", Value::String(key.to_string()), inline_json(child));
+    let mut lines = Vec::new();
+    for (key, child) in map {
+        let Some(metadata) = child.as_object().filter(|_| key == "planner_metadata") else {
+            lines.push(entry(key, child));
+            continue;
+        };
+        let mut inner: Vec<String> = DURABLE_CONTEXT_FIRST
+            .iter()
+            .filter_map(|name| metadata.get(*name).map(|block| format!(" {}", entry(name, block))))
+            .collect();
+        inner.extend(
+            metadata
+                .iter()
+                .filter(|(name, _)| !DURABLE_CONTEXT_FIRST.contains(&name.as_str()))
+                .map(|(name, block)| format!(" {}", entry(name, block))),
+        );
+        lines.push(format!("\"planner_metadata\": {{\n{}\n}}", inner.join(",\n")));
+    }
+    format!("{{\n{}\n}}", lines.join(",\n"))
+}
+
+/// Where the harness's own record of decisions is present, the excerpts of the
+/// memory files built from the rewritten notebook are left out: they are a
+/// summary of a summary of the same history (see labdirector::decision_ledger),
+/// and their paths stay for a lane that wants to open them.
+fn prefer_decision_memory(role_plan: &mut Value) {
+    let has_ledger_view = role_plan
+        .get("planner_metadata")
+        .and_then(|metadata| metadata.get("decision_memory"))
+        .is_some_and(|view| !view.is_null());
+    if !has_ledger_view {
+        return;
+    }
+    if let Some(memory) = role_plan.get_mut("cycle_memory_context").and_then(Value::as_object_mut) {
+        let removed = ["memory_excerpt", "memory_summary_excerpt"].iter().filter(|key| memory.remove(**key).is_some()).count();
+        if removed > 0 {
+            memory.insert(
+                "excerpts".to_string(),
+                json!("left out: planner_metadata.decision_memory is the record of this cycle's decisions; the files at the paths here are summaries built from the rewritten notebook"),
+            );
+        }
+    }
+}
+
 fn fit_prompt_to_byte_limit(
     render_prompt: &dyn Fn(&str, &str, &str) -> String,
     role_plan_text: &str,
@@ -858,7 +935,8 @@ pub(crate) fn build_codex_prompt(
         ),
         contract,
     );
-    let mut role_plan_text = serde_json::to_string_pretty(&role_plan_value)?;
+    prefer_decision_memory(&mut role_plan_value);
+    let mut role_plan_text = render_role_plan(&role_plan_value);
     // The budget note is not a truncation note, and the fallbacks below must not
     // erase it: a role handed a shortened block needs to know where the rest is
     // whether or not the prompt then also overflowed.
@@ -881,7 +959,7 @@ pub(crate) fn build_codex_prompt(
                 metadata.remove("recommended_actions");
             }
         }
-        role_plan_text = serde_json::to_string_pretty(&role_plan_value)?;
+        role_plan_text = render_role_plan(&role_plan_value);
         truncation_note = format!(
             "{budget_clause}\nPrompt note: oversized planning context was compacted aggressively before dispatch."
         );
@@ -983,6 +1061,8 @@ pub(crate) fn build_codex_prompt(
                             "owner_direction",
                             // Every director decision so far (labdirector::decision_ledger).
                             "decision_memory",
+                            // What earlier directors committed the cycle to.
+                            "commitments",
                         ] {
                             if let Some(value) = metadata.get(key) {
                                 meta[key] = value.clone();

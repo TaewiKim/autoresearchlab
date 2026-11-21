@@ -791,6 +791,9 @@ fn lead_selection_gate_reasons(
         lead,
         first_selection,
     ));
+    // And the cycle's own record: a design it rejected is not selected again
+    // without what changed (labdirector::decision_ledger).
+    reasons.extend(crate::labdirector::decision_ledger::lead_rejected_design_reasons(paths, cycle_id, lead));
     reasons
 }
 

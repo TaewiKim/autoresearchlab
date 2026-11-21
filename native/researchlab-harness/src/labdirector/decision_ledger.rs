@@ -30,8 +30,9 @@ use std::io::Write;
 /// Director lanes read per refresh. A first reading of a long cycle catches up
 /// over a few passes instead of holding one pass for the whole history.
 const MAX_LANES_PER_REFRESH: usize = 150;
-const RECENT_DECISIONS: usize = 10;
-const MAX_REJECTED_SHOWN: usize = 60;
+const RECENT_DECISIONS: usize = 8;
+/// Rejected designs shown with their reason; every other one is still named.
+const MAX_REJECTED_SHOWN: usize = 36;
 const MAX_COMMITMENTS_SHOWN: usize = 12;
 const MAX_LEADS_SHOWN: usize = 16;
 const MAX_DAYS_SHOWN: usize = 21;
@@ -178,6 +179,9 @@ pub(crate) fn refresh_decision_ledger(paths: &AppPaths, cycle_id: &str, max_lane
         let stamp = completed_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let record = record_for(&lane_id, &stamp, &lane_dir, &payload);
         writeln!(file, "{}", serde_json::to_string(&record)?)?;
+        // The same single pass, in the same order, applies what this director
+        // committed its successors to (labdirector::commitments).
+        super::commitments::record_director_commitments(paths, cycle_id, &lane_id, &stamp, &payload)?;
         added += 1;
     }
     file.flush()?;
@@ -198,6 +202,8 @@ pub(crate) fn refresh_decision_ledger(paths: &AppPaths, cycle_id: &str, max_lane
 pub(crate) fn rebuild_decision_ledger(paths: &AppPaths, cycle_id: &str) -> Result<usize> {
     let _ = fs::remove_file(decision_ledger_path(paths, cycle_id));
     let _ = fs::remove_file(ledger_state_path(paths, cycle_id));
+    // Rebuilt from the same lanes, so it starts empty with the ledger.
+    let _ = fs::remove_file(super::commitments::commitments_path(paths, cycle_id));
     let mut total = 0usize;
     loop {
         let added = refresh_decision_ledger(paths, cycle_id, 500)?;
@@ -302,7 +308,27 @@ pub(crate) fn decision_memory_view(records: &[Value]) -> Value {
     let mut rejected: Vec<Value> = rejected.into_values().collect();
     rejected.sort_by(|a, b| text(b, "last_at").cmp(text(a, "last_at")));
     let rejected_total = rejected.len();
+    // Every rejected design stays known by name: the older ones lose only the
+    // reason from this view, and the ledger has it.
+    let older_names: Vec<Value> = rejected
+        .iter()
+        .skip(MAX_REJECTED_SHOWN)
+        .map(|entry| {
+            if entry.get("ordered_by_owner") == Some(&json!(true)) {
+                json!(format!("{} (ordered by the owner; not closed)", text(entry, "family")))
+            } else {
+                entry.get("family").cloned().unwrap_or(Value::Null)
+            }
+        })
+        .collect();
     rejected.truncate(MAX_REJECTED_SHOWN);
+    for entry in rejected.iter_mut() {
+        let why: String = text(entry, "why").chars().take(150).collect();
+        entry["why"] = json!(why);
+        if let Some(object) = entry.as_object_mut() {
+            object.remove("first_at");
+        }
+    }
     // The validation terms directors changed, newest first, each wording once.
     let mut commitments: Vec<Value> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -326,7 +352,8 @@ pub(crate) fn decision_memory_view(records: &[Value]) -> Value {
                 .flatten()
                 .map(|order| format!("{} {}: {}", text(order, "role"), text(order, "type"), text(order, "what")))
                 .collect();
-            json!({"at": record.get("at"), "by": record.get("lane_id"), "asked_by": record.get("brief"), "decision": record.get("decision"), "lead": record.get("lead"), "gist": record.get("gist"), "orders": orders, "cancels": record.get("cancels")})
+            let gist: String = text(record, "gist").chars().take(380).collect();
+            json!({"at": record.get("at"), "by": record.get("lane_id"), "asked_by": record.get("brief"), "decision": record.get("decision"), "lead": record.get("lead"), "gist": gist, "orders": orders, "cancels": record.get("cancels")})
         })
         .collect();
     let mut days: BTreeMap<String, (u64, u64, u64, u64, BTreeMap<String, u64>)> = BTreeMap::new();
@@ -359,11 +386,103 @@ pub(crate) fn decision_memory_view(records: &[Value]) -> Value {
         "decisions_recorded": records.len(),
         "first_decision_at": records.first().and_then(|record| record.get("at")),
         "leads_selected": {"total": leads_total, "shown_newest_last": leads},
-        "designs_rejected_or_demoted": {"total": rejected_total, "shown_most_recent_first": rejected},
+        "designs_rejected_or_demoted": {"total": rejected_total, "shown_most_recent_first": rejected, "older_by_name": older_names},
         "validation_terms_changed": commitments,
         "recent_decisions": recent,
         "earlier_decisions_by_day": {"days_total": days_total, "shown_newest_first": by_day},
     })
+}
+
+/// Two design names that are the same design under a small rewording.
+fn same_design(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    let tokens = |key: &str| key.split('_').filter(|part| part.len() > 2).map(str::to_string).collect::<std::collections::BTreeSet<String>>();
+    let (a, b) = (tokens(left), tokens(right));
+    if a.len() < 3 || b.len() < 3 {
+        return false;
+    }
+    let shared = a.intersection(&b).count();
+    shared * 5 >= (a.len() + b.len() - shared) * 3 // Jaccard >= 0.6
+}
+
+fn rejected_design_gate_enabled() -> bool {
+    !matches!(env::var("RESEARCHLAB_REJECTED_DESIGN_GATE").ok().as_deref().map(str::trim), Some("0" | "off" | "false"))
+}
+
+/// Why a lead of this design may not be selected: the cycle rejected the design
+/// before, and the selection does not say what has changed since.
+///
+/// The decision memory tells every director which designs were rejected and why;
+/// this is the same record applied where the lead is set, because a rule a
+/// director is only told is a rule it can overlook -- step repetition is the most
+/// common failure in multi-agent traces (Cemri et al., MAST, 2025: 15.7%).
+/// Refused here, the selection is recorded with this reason where the next
+/// director reads it (`field_landscape.last_selection_rejections`).
+///
+/// Not refused: a design the owner ordered; a design selected again AFTER it was
+/// last listed as rejected (it was reopened then); and a selection that carries
+/// `reopens_rejected_design` naming what changed and the evidence for it.
+pub(crate) fn lead_rejected_design_reasons(paths: &AppPaths, cycle_id: &str, lead: &Value) -> Vec<String> {
+    if !rejected_design_gate_enabled() {
+        return Vec::new();
+    }
+    let family = ["primary_family", "family", "hypothesis_family"]
+        .iter()
+        .find_map(|key| lead.get(*key).and_then(Value::as_str))
+        .unwrap_or("");
+    let key = family_key(family);
+    if key.is_empty() {
+        return Vec::new();
+    }
+    let _ = refresh_decision_ledger(paths, cycle_id, MAX_LANES_PER_REFRESH);
+    rejected_design_reasons(&read_records(paths, cycle_id), &key, family, lead)
+}
+
+fn rejected_design_reasons(records: &[Value], key: &str, family: &str, lead: &Value) -> Vec<String> {
+    let mut last_rejected: Option<&Value> = None;
+    let mut rejected_as = String::new();
+    let mut times = 0u64;
+    let mut why = String::new();
+    let mut last_selected_at = String::new();
+    let mut owner_ordered = false;
+    for record in records {
+        let selected = family_key(text(record, "lead_family"));
+        if !selected.is_empty() && same_design(&selected, key) {
+            last_selected_at = text(record, "at").to_string();
+            owner_ordered |= record.get("from_owner").and_then(Value::as_bool) == Some(true);
+        }
+        for item in record.get("rejected").and_then(Value::as_array).into_iter().flatten() {
+            if same_design(&family_key(text(item, "family")), key) {
+                last_rejected = Some(record);
+                rejected_as = text(item, "family").to_string();
+                why = text(item, "why").to_string();
+                times += 1;
+            }
+        }
+    }
+    let Some(rejected_by) = last_rejected else {
+        return Vec::new();
+    };
+    if owner_ordered || last_selected_at.as_str() > text(rejected_by, "at") {
+        return Vec::new();
+    }
+    let reopening = lead.get("reopens_rejected_design");
+    let what_changed = reopening.and_then(|value| value.get("what_changed")).and_then(Value::as_str).unwrap_or("").trim();
+    let has_evidence = reopening
+        .and_then(|value| value.get("evidence_refs"))
+        .and_then(Value::as_array)
+        .is_some_and(|refs| refs.iter().any(|item| item.as_str().is_some_and(|text| !text.trim().is_empty())));
+    if what_changed.chars().count() >= 40 && has_evidence {
+        return Vec::new();
+    }
+    vec![format!(
+        "design '{family}' was rejected before: listed {times} time(s) as rejected or demoted ('{rejected_as}'), last by {} on {}, for: \"{}\". It is not selected again as it stands. If something has changed, state it in selected_hypothesis.reopens_rejected_design = {{\"design\": \"{rejected_as}\", \"what_changed\": \"the new evidence or the change of design that answers that reason\", \"evidence_refs\": [paths]}}; if nothing has, choose a design the decision memory does not list.",
+        text(rejected_by, "lane_id"),
+        text(rejected_by, "at").chars().take(10).collect::<String>(),
+        why.chars().take(220).collect::<String>(),
+    )]
 }
 
 /// What every director lane is given of the cycle's decisions so far.
@@ -377,7 +496,7 @@ pub(crate) fn decision_memory_director_context(paths: &AppPaths, cycle_id: &str)
     }
     let mut view = decision_memory_view(&records);
     view["ledger_path"] = json!(format!(".research-lab/state/{cycle_id}-decision-ledger.jsonl"));
-    view["rule"] = json!("This is the harness's own record of every director decision in this cycle, one line per decision in the ledger file, never rewritten; your notebook is a summary and this is the record. Before you propose, select or order anything: (1) read `designs_rejected_or_demoted` -- a design listed there is not proposed again unless you name the NEW evidence that answers the reason recorded for it; (2) read `leads_selected` -- do not confuse a lead with an earlier one of a similar name, and do not treat an experiment the owner ordered as the panel it replaced: an entry marked `ordered_by_owner` is not closed by the reasons recorded against an earlier attempt; (3) `validation_terms_changed` are commitments in force until a later decision changes them explicitly; (4) `recent_decisions` are what your predecessors just did -- continue their unfinished work before opening a new line. When you need the detail behind a day or a design, read that lane's line in the ledger rather than guessing.");
+    view["rule"] = json!("This is the harness's own record of every director decision in this cycle, one line per decision in the ledger file, never rewritten; your notebook is a summary and this is the record. Before you propose, select or order anything: (1) read `designs_rejected_or_demoted` -- a design listed there (by reason or by name) is not proposed again unless you name the NEW evidence that answers the reason recorded for it, in `selected_hypothesis.reopens_rejected_design` {design, what_changed, evidence_refs}; the harness does not apply a selection of a rejected design without it; (2) read `leads_selected` -- do not confuse a lead with an earlier one of a similar name, and do not treat an experiment the owner ordered as the panel it replaced: an entry marked `ordered_by_owner` is not closed by the reasons recorded against an earlier attempt; (3) `validation_terms_changed` are commitments in force until a later decision changes them explicitly; (4) `recent_decisions` are what your predecessors just did -- continue their unfinished work before opening a new line. When you need the detail behind a day or a design, read that lane's line in the ledger rather than guessing.");
     view
 }
 
@@ -421,14 +540,14 @@ mod tests {
         assert_eq!(leads[0]["ordered_by_owner"], json!(true));
         assert_eq!(view["validation_terms_changed"][0]["term"], json!("pilot seeds [100,101]"));
         assert_eq!(view["recent_decisions"].as_array().unwrap().len(), RECENT_DECISIONS);
-        // The fifty older decisions are not dropped: they are counted by day.
+        // The older decisions are not dropped: they are counted by day.
         let by_day: u64 = view["earlier_decisions_by_day"]["shown_newest_first"]
             .as_array()
             .unwrap()
             .iter()
             .map(|day| day.as_str().unwrap().split(": ").nth(1).unwrap().split(' ').next().unwrap().parse::<u64>().unwrap())
             .sum();
-        assert_eq!(by_day, 50);
+        assert_eq!(by_day as usize, 60 - RECENT_DECISIONS);
     }
 
     #[test]
@@ -473,6 +592,48 @@ mod tests {
         assert!(other.get("ordered_by_owner").is_none());
     }
 
+    fn lead(family: &str, reopening: Value) -> Value {
+        json!({"statement": "a lead", "primary_family": family, "reopens_rejected_design": reopening})
+    }
+
+    // MEASURED: with five rejected designs in the notebook and ninety-two forgotten,
+    // nothing stood between a director and a design the cycle had already closed.
+    #[test]
+    fn a_rejected_design_is_not_selected_again_without_what_changed() {
+        let records = vec![
+            decision("d1", "2026-11-10T00:00:00Z", None, &[("paired_rendering", "published overlap confirmed")], &[], false),
+            decision("d2", "2026-11-12T00:00:00Z", None, &[("randomized_semantic_validity_intervention", "intervals crossed zero")], &[], false),
+        ];
+        let refused = rejected_design_reasons(&records, "paired_rendering", "paired_rendering", &lead("paired_rendering", Value::Null));
+        assert_eq!(refused.len(), 1);
+        assert!(refused[0].contains("published overlap confirmed") && refused[0].contains("reopens_rejected_design"), "{refused:?}");
+        // A small rewording of the name is the same design.
+        let reworded = "randomized_semantic_validity_intervention_v2";
+        assert_eq!(rejected_design_reasons(&records, &family_key(reworded), reworded, &lead(reworded, Value::Null)).len(), 1);
+        // Naming what changed, with evidence, reopens it.
+        let reopening = json!({"design": "paired_rendering", "what_changed": "the methods supplement now shows the published procedure renders once, not per pair", "evidence_refs": ["lanes/followup-scout-900/result.json"]});
+        assert!(rejected_design_reasons(&records, "paired_rendering", "paired_rendering", &lead("paired_rendering", reopening)).is_empty());
+        // Words without evidence do not.
+        let vague = json!({"design": "paired_rendering", "what_changed": "it seems more promising now than it did before", "evidence_refs": []});
+        assert_eq!(rejected_design_reasons(&records, "paired_rendering", "paired_rendering", &lead("paired_rendering", vague)).len(), 1);
+        // A design the cycle never rejected is free.
+        assert!(rejected_design_reasons(&records, "common_support_pose", "common_support_pose", &lead("common_support_pose", Value::Null)).is_empty());
+    }
+
+    #[test]
+    fn the_owners_design_and_a_design_already_reopened_are_not_refused() {
+        let records = vec![
+            decision("d1", "2026-11-10T00:00:00Z", None, &[("coverage_curves", "historical estimates unidentified")], &[], false),
+            decision("d2", "2026-11-16T00:00:00Z", Some("coverage_curves a new common-support panel"), &[], &[], true),
+            decision("d3", "2026-11-21T00:00:00Z", None, &[("coverage_curves", "historical estimates unidentified"), ("other_design", "no delta")], &[], false),
+            decision("d4", "2026-11-22T00:00:00Z", Some("other_design with the delta shown"), &[], &[], false),
+        ];
+        // Ordered by the owner: the reason recorded against the old panel does not close it.
+        assert!(rejected_design_reasons(&records, "coverage_curves", "coverage_curves", &lead("coverage_curves", Value::Null)).is_empty());
+        // Selected again after its last rejection: it was reopened then.
+        assert!(rejected_design_reasons(&records, "other_design", "other_design", &lead("other_design", Value::Null)).is_empty());
+    }
+
     #[test]
     fn the_view_stays_small_however_long_the_cycle_runs() {
         let records: Vec<Value> = (0..3000)
@@ -483,6 +644,10 @@ mod tests {
             .collect();
         let view = decision_memory_view(&records);
         assert_eq!(view["designs_rejected_or_demoted"]["total"], json!(3000));
-        assert!(view.to_string().len() < 36_000, "{} bytes", view.to_string().len());
+        // Thirty-six with their reasons, the other 2,964 by name: none is unknown.
+        let named = view["designs_rejected_or_demoted"]["shown_most_recent_first"].as_array().unwrap().len()
+            + view["designs_rejected_or_demoted"]["older_by_name"].as_array().unwrap().len();
+        assert_eq!(named, 3000);
+        assert!(view.to_string().len() < 70_000, "{} bytes", view.to_string().len());
     }
 }

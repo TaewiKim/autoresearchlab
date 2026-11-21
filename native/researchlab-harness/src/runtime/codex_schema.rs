@@ -190,7 +190,7 @@ pub(crate) fn codex_output_schema(role: &str, action_type: &str) -> Option<Value
             "additionalProperties": false
         }))
     } else if role == "lab-director" && action_type == "lab_director_requery_followup" {
-        Some(json!({
+        Some(with_design_memory_fields(json!({
             "type": "object",
             "required": [
                 "requery_decision",
@@ -578,7 +578,7 @@ pub(crate) fn codex_output_schema(role: &str, action_type: &str) -> Option<Value
                 }
             },
             "additionalProperties": false
-        }))
+        })))
     } else if role == "analyst" {
         Some(with_handoff_readiness(json!({
             "type": "object",
@@ -1021,6 +1021,33 @@ mod tests {
         assert_required_matches_properties(&schema, "lab-director-requery");
     }
 
+    // 2026-11-21: the decision memory and the commitments reach the harness only
+    // through a director's structured decision, so the strict schema must carry
+    // the reopening of a rejected design and the commitment updates.
+    #[test]
+    fn a_decision_can_reopen_a_rejected_design_and_update_commitments() {
+        let schema = codex_output_schema("lab-director", "lab_director_requery_followup")
+            .expect("lab-director requery schema");
+        let reopening = json!({"design": "paired_rendering", "what_changed": "the supplement shows one render", "evidence_refs": ["lanes/x/result.json"]});
+        for object in [
+            &schema["properties"]["selected_hypothesis"],
+            &schema["properties"]["replacement_hypotheses"]["items"],
+        ] {
+            assert!(object["required"].as_array().unwrap().contains(&json!("reopens_rejected_design")));
+            assert!(conforms(&object["properties"]["reopens_rejected_design"], &reopening));
+            assert!(conforms(&object["properties"]["reopens_rejected_design"], &Value::Null));
+        }
+        assert!(schema["required"].as_array().unwrap().contains(&json!("commitment_updates")));
+        let updates = &schema["properties"]["commitment_updates"];
+        assert!(conforms(updates, &Value::Null));
+        assert!(conforms(updates, &json!([
+            {"op": "add", "id": null, "claim": "Pilot runs use seeds [100,101].", "reason": null, "basis": ["lanes/x/result.json"]},
+            {"op": "withdraw", "id": "cm-12345678", "claim": null, "reason": "superseded by the confirmation run", "basis": null}
+        ])));
+        assert_eq!(updates["items"]["properties"]["op"]["enum"], json!(["add", "supersede", "withdraw"]));
+        assert_required_matches_properties(&schema, "lab-director-requery");
+    }
+
     // cycle-b-20260919, 2026-09-19: once the expert selection is engaged the
     // lead must name the slate candidate it is, so both the lead and a
     // replacement must be able to carry it through the strict schema.
@@ -1135,6 +1162,55 @@ mod tests {
 /// absent -- so all 163 handoffs on the cycle were "not ready", including
 /// analysts whose summaries said "the handoff is ready", and every lab-runner
 /// waited on a handoff that could not exist.
+/// The fields by which a director's decision reaches the cycle's durable memory:
+/// the reopening of a rejected design (labdirector::decision_ledger) and the
+/// commitments it makes, changes or ends (labdirector::commitments). Added after
+/// construction: the requery schema's `json!` literal is at the macro's recursion
+/// limit.
+fn with_design_memory_fields(mut schema: Value) -> Value {
+    let reopening = json!({
+        "type": ["object", "null"],
+        "description": "Null unless this design is listed in planner_metadata.decision_memory.designs_rejected_or_demoted. Then: what has changed since it was rejected, with the evidence. The harness does not apply a selection of a rejected design without it.",
+        "properties": {
+            "design": { "type": "string" },
+            "what_changed": { "type": "string" },
+            "evidence_refs": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["design", "what_changed", "evidence_refs"],
+        "additionalProperties": false
+    });
+    let add_reopening = |object: &mut Value| {
+        if object.get("properties").is_some_and(Value::is_object) {
+            object["properties"]["reopens_rejected_design"] = reopening.clone();
+            if let Some(required) = object["required"].as_array_mut() {
+                required.push(json!("reopens_rejected_design"));
+            }
+        }
+    };
+    add_reopening(&mut schema["properties"]["selected_hypothesis"]);
+    add_reopening(&mut schema["properties"]["replacement_hypotheses"]["items"]);
+    schema["properties"]["commitment_updates"] = json!({
+        "type": ["array", "null"],
+        "description": "What this decision binds later directors to, or changes in what earlier ones bound you to (planner_metadata.commitments). add: a claim that stands on its own. supersede: the id being replaced, the new claim and the reason. withdraw: the id and the reason. Null or empty when nothing changes.",
+        "items": {
+            "type": "object",
+            "properties": {
+                "op": { "type": "string", "enum": ["add", "supersede", "withdraw"] },
+                "id": { "type": ["string", "null"] },
+                "claim": { "type": ["string", "null"] },
+                "reason": { "type": ["string", "null"] },
+                "basis": { "type": ["array", "null"], "items": { "type": "string" } }
+            },
+            "required": ["op", "id", "claim", "reason", "basis"],
+            "additionalProperties": false
+        }
+    });
+    if let Some(required) = schema["required"].as_array_mut() {
+        required.push(json!("commitment_updates"));
+    }
+    schema
+}
+
 fn with_handoff_readiness(mut schema: Value) -> Value {
     schema["properties"]["handoff_readiness"] = json!({
         "type": "object",

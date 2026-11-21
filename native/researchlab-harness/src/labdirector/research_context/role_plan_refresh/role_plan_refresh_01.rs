@@ -135,6 +135,9 @@ pub(crate) fn refresh_role_plan_context_before_launch(
         } else {
             planner_metadata["decision_memory"] = decision_memory;
         }
+        // What earlier directors bound this one to. After the decision memory,
+        // whose refresh is what reads new commitments in.
+        planner_metadata["commitments"] = crate::labdirector::commitments::commitments_director_context(paths, cycle_id);
         // "Avoid broad repeated scout searches" is an efficiency rule for a cycle
         // that already knows its field. MEASURED ON cycle-b-20260918: with one
         // 2021 review admitted, lab-director-01 wrote "Do not restart broad

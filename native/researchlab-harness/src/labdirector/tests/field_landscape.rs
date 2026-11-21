@@ -446,3 +446,29 @@ fn the_owners_direction_opens_and_closes_the_director_prompt_whatever_is_cut() {
     let plain = crate::runtime::codex_prompt::build_codex_prompt(&contract, Some(&json!({"role": "lab-director"}))).unwrap();
     assert!(!plain.contains("OWNER STANDING DIRECTION"));
 }
+
+
+// MEASURED: 41 KB of a 290 KB director prompt was indentation.
+#[test]
+fn the_role_plan_is_carried_without_indentation_and_with_what_holds_first() {
+    let plan = json!({
+        "action_type": "lab_director_requery_followup",
+        "cycle_memory_context": {"memory_excerpt": "a summary of the notebook", "memory_summary_excerpt": "another", "memory_path": "/m/MEMORY.md"},
+        "planner_metadata": {
+            "chronicle_decision_digest": {"recent": [{"a": 1}, {"b": [1, 2, 3]}]},
+            "decision_memory": {"decisions_recorded": 1843},
+            "owner_direction": {"text": "return to the coverage hypothesis"},
+            "work_orders": {"standing": []}
+        }
+    });
+    let text = crate::runtime::codex_prompt::render_role_plan(&plan);
+    // Still the same JSON.
+    assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), plan);
+    assert!(text.len() < serde_json::to_string_pretty(&plan).unwrap().len());
+    assert!(!text.contains("\n  "), "no nested indentation: {text}");
+    let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("missing {needle} in {text}"));
+    assert!(at("\"owner_direction\"") < at("\"decision_memory\""));
+    assert!(at("\"decision_memory\"") < at("\"work_orders\""));
+    assert!(at("\"work_orders\"") < at("\"chronicle_decision_digest\""));
+    assert!(text.contains("\"decisions_recorded\": 1843"), "separators keep a space: {text}");
+}
