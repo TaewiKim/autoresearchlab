@@ -58,3 +58,29 @@ test("a state file a finished lane wrote for itself is moved into that lane", ()
   assert.deepEqual(quarantineAgentStateFiles({ cwd: fx.cwd, cycleId: CYCLE }), []);
   fs.rmSync(fx.cwd, { recursive: true, force: true });
 });
+
+// MEASURED ON cycle-a-20260919: the GPU job ledger (2026-11-11) and the
+// decision ledger (2026-11-21) are append-only records whose FIRST line names a
+// finished lane, and neither kind was registered -- so each was moved into that
+// lane's directory as if the lane had written it.
+test("a ledger the harness keeps is not taken for a lane's file because its first record names one", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "rl-boundary-ledger-"));
+  const cycleId = "c";
+  const state = path.join(cwd, ".research-lab", "state");
+  const lane = path.join(cwd, ".research-lab", "lanes", cycleId, "followup-lab-director-01");
+  fs.mkdirSync(state, { recursive: true });
+  fs.mkdirSync(lane, { recursive: true });
+  fs.writeFileSync(path.join(lane, "final-status.json"), JSON.stringify({ status: "completed" }));
+  const record = `${JSON.stringify({ lane_id: "followup-lab-director-01", at: "2026-11-21T00:00:00Z" })}\n`;
+  for (const kind of ["decision-ledger", "gpu-jobs"]) {
+    fs.writeFileSync(path.join(state, `${cycleId}-${kind}.jsonl`), record);
+  }
+  // An unregistered file of the same shape is still what the boundary is for.
+  fs.writeFileSync(path.join(state, `${cycleId}-lead-manifest.json`), JSON.stringify({ generated_by: "followup-lab-director-01" }));
+
+  const moved = quarantineAgentStateFiles({ cwd, cycleId }).map((item) => item.file);
+  assert.deepEqual(moved, [`${cycleId}-lead-manifest.json`]);
+  assert.ok(fs.existsSync(path.join(state, `${cycleId}-decision-ledger.jsonl`)), "the decision ledger was moved out of state");
+  assert.ok(fs.existsSync(path.join(state, `${cycleId}-gpu-jobs.jsonl`)), "the GPU ledger was moved out of state");
+  fs.rmSync(cwd, { recursive: true, force: true });
+});

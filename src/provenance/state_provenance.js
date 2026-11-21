@@ -181,6 +181,27 @@ const STATE_PROVENANCE = {
   "watchdog-policy": { class: "authoritative", why: "an operating decision" },
   "workgraph": { class: "derived", why: "rebuilt from the lane tree and the event log" },
 "agent-communication-digest": { class: "derived", why: "rebuilt from the lane tree and the event log" },
+  // Registered 2026-11-21. Every kind below was written by the harness and
+  // named in no table, so orchestrator/state_boundary.js -- which moves an
+  // unregistered state file into the lane its first record names -- took two of
+  // them for agents' files: the GPU job ledger on 2026-11-11 (into
+  // followup-engineer-1256) and the decision ledger on 2026-11-21 (into
+  // followup-selection-beliefs-01, 49 minutes after it was built, so the next
+  // director was handed no decision memory). The test that names every
+  // unregistered kind had been failing since the first of them was added.
+  "work-orders": { class: "authoritative", why: "which orders stand, when each was recorded, carried out and reported; a rebuild loses the hold clock and who was told" },
+  "work-order-dispatch-trace": { class: "derived", why: "rewritten on every dispatch pass" },
+  "gpu-jobs": { class: "authoritative", why: "the ledger of what ran on the GPU and for how long, including receipts reconstructed on the host" },
+  "gpu-route-announced": { class: "authoritative", why: "a record that the cycle was told once; losing it tells it again" },
+  "owner-direction": { class: "authoritative", why: "the owner's standing direction and its history" },
+  "decision-ledger": { class: "derived", why: "one record per completed director lane, rebuilt from the lanes' structured results (decision-ledger --rebuild)" },
+  "decision-ledger-state": { class: "derived", why: "the reading position of the decision ledger" },
+  "commitments": { class: "derived", why: "rebuilt with the decision ledger from the directors' commitment_updates" },
+  "dependency-lane-retirements": { class: "authoritative", why: "which blocked lanes a director retired, and why" },
+  "reference-assets": { class: "derived", why: "the state of the reference code and checkpoint fetch, rebuilt by running it" },
+  "reference-assets-plan": { class: "derived", why: "rebuilt from the SOTA cards' declared assets" },
+  "reference-assets-announced": { class: "authoritative", why: "a record that the director was told once the assets arrived" },
+  "supervisor-interrupt": { class: "authoritative", why: "when the last decision-latency interrupt was raised; losing it loses only the cooldown" },
 };
 
 function classifyStateKind(kind) {
