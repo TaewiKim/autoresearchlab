@@ -96,7 +96,7 @@ pub(crate) fn work_order_dispatchable(role: &str, action_type: &str) -> bool {
     )
 }
 
-fn parse_time(value: Option<&Value>) -> Option<DateTime<Utc>> {
+pub(crate) fn parse_time(value: Option<&Value>) -> Option<DateTime<Utc>> {
     value
         .and_then(Value::as_str)
         .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
@@ -171,7 +171,7 @@ fn close(order: &mut Value, status: &str, reason: String) {
 }
 
 /// The director payload of a lane result, in either shape the runtime writes.
-fn director_payload(result_path: &Path) -> Option<Value> {
+pub(crate) fn director_payload(result_path: &Path) -> Option<Value> {
     if fs::metadata(result_path).ok()?.len() > 5 * 1024 * 1024 {
         return None;
     }
@@ -381,7 +381,7 @@ fn lane_completed_after(lane_dir: &Path, after: DateTime<Utc>) -> Option<DateTim
 }
 
 /// The completed lanes of `role` that finished after `after`, oldest first.
-fn completed_role_lanes_after(paths: &AppPaths, cycle_id: &str, role: &str, after: DateTime<Utc>) -> Result<Vec<(DateTime<Utc>, String, PathBuf)>> {
+pub(crate) fn completed_role_lanes_after(paths: &AppPaths, cycle_id: &str, role: &str, after: DateTime<Utc>) -> Result<Vec<(DateTime<Utc>, String, PathBuf)>> {
     let mut found = Vec::new();
     if let Some(lanes) = completed_followup_lane_dirs_for_role_from_state(paths, cycle_id, role)? {
         for lane in lanes {

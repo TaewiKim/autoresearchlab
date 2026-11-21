@@ -979,6 +979,10 @@ pub(crate) fn build_codex_prompt(
                             "expert_selection_contract",
                             // Orders standing from earlier decisions.
                             "work_orders",
+                            // The owner's standing direction (labdirector::owner_direction).
+                            "owner_direction",
+                            // Every director decision so far (labdirector::decision_ledger).
+                            "decision_memory",
                         ] {
                             if let Some(value) = metadata.get(key) {
                                 meta[key] = value.clone();
@@ -1041,7 +1045,36 @@ Prompt note: this prompt references role_plan fields that are NOT present in the
         max_prompt_bytes,
     );
 
-    Ok(prompt_text)
+    Ok(pin_owner_direction(prompt_text, role_plan))
+}
+
+/// Put the owner's standing direction where a long prompt is reliably read: first,
+/// and again last, outside everything the size limit may cut.
+///
+/// The direction also travels in `planner_metadata.owner_direction`, but that sits
+/// in the middle of a prompt of some 300 KB, and the role plan is what gets
+/// compacted or reduced to a digest when the prompt is too large. Position matters
+/// in long contexts -- information at the start and the end is used far more
+/// reliably than the same information in the middle (Liu et al., "Lost in the
+/// Middle", TACL 2023), and restating an instruction is the strongest measured
+/// counter to instruction drift (Li et al., COLM 2024). So the pinned text is
+/// added after the fit, by construction present whatever was truncated.
+pub(crate) fn pin_owner_direction(prompt: String, role_plan: Option<&Value>) -> String {
+    let Some(direction) = role_plan
+        .and_then(|plan| plan.get("planner_metadata"))
+        .and_then(|metadata| metadata.get("owner_direction"))
+    else {
+        return prompt;
+    };
+    let text = direction.get("text").and_then(Value::as_str).unwrap_or("").trim();
+    if text.is_empty() {
+        return prompt;
+    }
+    let issued = direction.get("issued_at").and_then(Value::as_str).unwrap_or("an earlier date");
+    let rule = direction.get("rule").and_then(Value::as_str).unwrap_or("");
+    format!(
+        "OWNER STANDING DIRECTION (in force; issued {issued}). {rule}\n\n{text}\n\n-----\n\n{prompt}\n\n-----\nBEFORE YOU ANSWER: the owner's standing direction at the top of this prompt is in force. Your decision carries it forward, or says exactly what blocks it and the smallest change that would make it feasible. The direction, restated:\n\n{text}\n"
+    )
 }
 
 pub(crate) fn build_codex_context_retry_prompt(

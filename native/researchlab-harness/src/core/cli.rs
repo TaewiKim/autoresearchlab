@@ -75,6 +75,15 @@ pub(crate) enum Commands {
         #[arg(long)]
         cycle_id: String,
     },
+    /// The cycle's decision ledger: bring it up to date and print what every
+    /// director is shown of it. `--rebuild` reads the cycle's director lanes
+    /// again from the first.
+    DecisionLedger {
+        #[arg(long)]
+        cycle_id: String,
+        #[arg(long, default_value_t = false)]
+        rebuild: bool,
+    },
     /// Run one GPU job request (<lane>/gpu-jobs/<id>.request.json) in the
     /// harness's GPU sandbox and print its result. The broker does this for a
     /// running lane; this is the same code, by hand.

@@ -26,6 +26,8 @@ pub(crate) use reference_assets::{
     reference_assets_summary, reference_root,
 };
 pub(crate) mod work_orders;
+pub(crate) mod owner_direction;
+pub(crate) mod decision_ledger;
 pub(crate) use work_orders::{
     announce_gpu_route, announce_work_order_results, append_capability_provisioning_actions, flush_order_trace,
     trace_order,

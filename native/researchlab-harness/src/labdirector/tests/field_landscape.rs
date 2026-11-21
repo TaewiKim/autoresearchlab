@@ -379,3 +379,70 @@ fn a_director_lane_is_refreshed_with_the_landscape_and_broad_acquisition_is_not_
     assert_eq!(avoid.len(), 1, "{avoid:?}");
     assert!(metadata["hypothesis_gate_efficiency_mandate"]["suspended_until_field_landscape_is_valid"].is_string());
 }
+
+
+// MEASURED ON cycle-a-20260919, 2026-11-16..21: the owner's direction was
+// in director 2009's prompt and in none five days later.
+#[test]
+fn every_director_lane_is_handed_the_owners_standing_direction() {
+    let temp = TempDir::new().unwrap();
+    let paths = build_paths(temp.path());
+    let cycle = "owner-direction-refresh";
+    landscape_dispatch_cycle(&paths, cycle);
+    let refreshed = |lane_id: &str| {
+        let contract_path = create_lane_contract(&paths, cycle, lane_id, "lab-director", "codex-agent", "read-write-scoped", "# task").unwrap();
+        let contract: LaneContract = serde_json::from_value(read_json(&contract_path).unwrap()).unwrap();
+        write_json(&lane_role_plan_path(&paths, cycle, lane_id), &json!({"lane_id": lane_id, "role": "lab-director", "action_type": "lab_director_requery_followup"})).unwrap();
+        refresh_role_plan_context_before_launch(&paths, cycle, &contract).unwrap();
+        read_json(&lane_role_plan_path(&paths, cycle, lane_id)).unwrap()["planner_metadata"].clone()
+    };
+    assert!(refreshed("followup-lab-director-01").get("owner_direction").is_none(), "no direction, no key");
+    write_json(
+        &crate::labdirector::owner_direction::owner_direction_path(&paths, cycle),
+        &json!({"cycle_id": cycle, "direction": {"text": "return to the coverage hypothesis", "issued_at": "2026-11-16T00:39:51Z"}}),
+    )
+    .unwrap();
+    for lane_id in ["followup-lab-director-02", "followup-lab-director-60"] {
+        let metadata = refreshed(lane_id);
+        assert_eq!(metadata["owner_direction"]["text"], json!("return to the coverage hypothesis"), "{lane_id}");
+    }
+}
+
+
+// Liu et al. 2023 ("Lost in the Middle") and Li et al. 2024: a long prompt is read
+// reliably at its start and its end, and a restated instruction resists drift.
+#[test]
+fn the_owners_direction_opens_and_closes_the_director_prompt_whatever_is_cut() {
+    let temp = TempDir::new().unwrap();
+    let task = temp.path().join("task.md");
+    fs::write(&task, "# task").unwrap();
+    let contract = LaneContract {
+        cycle_id: "c".to_string(),
+        lane_id: "followup-lab-director-01".to_string(),
+        role: "lab-director".to_string(),
+        runtime_class: "codex-agent".to_string(),
+        mode: "async".to_string(),
+        cwd: temp.path().to_path_buf(),
+        task_file: task,
+        allowed_inputs: Vec::new(),
+        allowed_outputs: Vec::new(),
+        output_artifact: None,
+        fallback_strategy: None,
+    };
+    let direction = "return to the coverage hypothesis with a new common-support panel";
+    // A role plan far past the prompt limit: the builder falls back to a digest.
+    let plan = json!({
+        "lane_id": "followup-lab-director-01", "role": "lab-director", "action_type": "lab_director_requery_followup",
+        "planner_metadata": {
+            "owner_direction": {"text": direction, "issued_at": "2026-11-16T00:39:51Z", "rule": "It stays in force until the owner replaces it."},
+            "chronicle_decision_digest": {"filler": "x".repeat(1_200_000)}
+        }
+    });
+    let prompt = crate::runtime::codex_prompt::build_codex_prompt(&contract, Some(&plan)).unwrap();
+    assert!(prompt.starts_with("OWNER STANDING DIRECTION"), "{}", &prompt[..200]);
+    assert!(prompt.trim_end().ends_with(direction), "the direction is not the last thing read");
+    assert!(prompt.matches(direction).count() >= 2);
+    // A director with no standing direction is given the prompt unchanged.
+    let plain = crate::runtime::codex_prompt::build_codex_prompt(&contract, Some(&json!({"role": "lab-director"}))).unwrap();
+    assert!(!plain.contains("OWNER STANDING DIRECTION"));
+}

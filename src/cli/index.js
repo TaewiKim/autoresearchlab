@@ -676,6 +676,16 @@ function main() {
     return;
   }
 
+  if (process.argv[2] === "direct") {
+    try {
+      require("./direct").runDirectCommand(process.argv.slice(3));
+    } catch (error) {
+      process.stderr.write(`direct: ${error.message}\n`);
+      process.exit(1);
+    }
+    return;
+  }
+
   if (process.argv[2] === "tell") {
     try {
       require("./tell").runTellCommand(process.argv.slice(3));

@@ -115,6 +115,26 @@ pub(crate) fn refresh_role_plan_context_before_launch(
         // The orders still standing from earlier decisions, and how to order an
         // environment. See labdirector::work_orders.
         planner_metadata["work_orders"] = work_orders_director_context(paths, cycle_id);
+        // The owner's standing direction, on every director lane until the owner
+        // replaces or withdraws it. See labdirector::owner_direction.
+        let owner_direction = crate::labdirector::owner_direction::owner_direction_director_context(paths, cycle_id);
+        if owner_direction.is_null() {
+            if let Some(object) = planner_metadata.as_object_mut() {
+                object.remove("owner_direction");
+            }
+        } else {
+            planner_metadata["owner_direction"] = owner_direction;
+        }
+        // The harness's own record of every director decision so far: leads
+        // selected, designs rejected, terms changed. See labdirector::decision_ledger.
+        let decision_memory = crate::labdirector::decision_ledger::decision_memory_director_context(paths, cycle_id);
+        if decision_memory.is_null() {
+            if let Some(object) = planner_metadata.as_object_mut() {
+                object.remove("decision_memory");
+            }
+        } else {
+            planner_metadata["decision_memory"] = decision_memory;
+        }
         // "Avoid broad repeated scout searches" is an efficiency rule for a cycle
         // that already knows its field. MEASURED ON cycle-b-20260918: with one
         // 2021 review admitted, lab-director-01 wrote "Do not restart broad

@@ -136,6 +136,12 @@ fn run() -> Result<()> {
         Commands::WorkOrders { cycle_id } => {
             print_json(&crate::labdirector::work_orders::refresh_work_orders(&paths, &cycle_id)?)?;
         }
+        Commands::DecisionLedger { cycle_id, rebuild } => {
+            if rebuild {
+                crate::labdirector::decision_ledger::rebuild_decision_ledger(&paths, &cycle_id)?;
+            }
+            print_json(&crate::labdirector::decision_ledger::decision_memory_director_context(&paths, &cycle_id))?;
+        }
         Commands::RunPlan {
             cycle_id,
             max_passes,

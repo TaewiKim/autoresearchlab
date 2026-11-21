@@ -241,6 +241,7 @@ docker run --rm -v rl-state:/state -v "$PWD:/out" ubuntu:24.04 cp -r /state /out
 | `researchlab refresh-cycle --cycle-id <id>` | Rebuild all derived reviews and notes |
 | `researchlab resume-cycle --cycle-id <id> --continuous` | Resume the scheduler loop without the supervisor |
 | `researchlab watch-cycle --cycle-id <id> --daemon` | A watchdog that restarts a stalled cycle (needs `bash`, `jq`) |
+| `researchlab direct --cycle-id <id> --message-file <path>` | Give the cycle a standing direction every LabDirector sees until you replace it (`--withdraw` ends it); `tell` reaches one decision only |
 | `researchlab import-codex-auth` | Re-import the Codex login after `codex login` |
 | `researchlab keys list` / `keys set <name>` / `keys unset <name>` | Your API keys (masked when listed; never taken as an argument) |
 | `researchlab candidates --cycle-id <id>` / `select --cycle-id <id> --candidate <id>` | The owner checkpoint: see the candidate problems, choose one |
