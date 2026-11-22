@@ -29,6 +29,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { createHash } = require("node:crypto");
 
 const { writeJson } = require("../shared/json");
 
@@ -352,6 +353,66 @@ function selectedMaterializedSimulation(ctx) {
   });
 }
 
+// MEASURED ON cycle-a-20260919, 2026-11-22: Director 2077
+// withdrew the failed visual experiment order and cited Engineer 1272's
+// completed release reproduction. The null order sent progress back to
+// lead_selected through eleven capability lanes. Count the cited receipt
+// for the anchor alone, so the new experiment still needs its own data.
+function citedReproductionMs(ctx) {
+  const lead = ctx.read("lab-director-hypothesis").value;
+  const director = lead?.generated_by;
+  if (lead?.projection_source !== "lab_director_lane_result"
+    || !/^(?:followup-)?lab-director-\d+(?:-recovery-\d+)*$/.test(director || "")) return 0;
+  const directorDir = path.join(ctx.lanesDir, director);
+  const directorFinal = readJsonOrNull(path.join(directorDir, "final-status.json"));
+  if (directorFinal?.status !== "completed" || directorFinal.degraded
+    || directorFinal.superseded_by_user_instruction) return 0;
+  const notes = readJsonOrNull(path.join(directorDir, "lab-director-research-notes.json"));
+  if (notes?.cycle_id !== ctx.cycleId || !Array.isArray(notes.evidence_snapshot)) return 0;
+
+  const artifactsDir = path.join(researchRoot(ctx.cwd), "artifacts", ctx.cycleId);
+  let newest = 0;
+  for (const evidence of notes.evidence_snapshot) {
+    if (typeof evidence?.source !== "string") continue;
+    const manifestPath = path.resolve(ctx.cwd, evidence.source);
+    const [engineer, ...parts] = path.relative(artifactsDir, manifestPath).split(path.sep);
+    if (!/^(?:followup-)?engineer-\d+(?:-recovery-\d+)*$/.test(engineer)
+      || parts.at(-1) !== "manifest.json") continue;
+    const engineerDir = path.join(ctx.lanesDir, engineer);
+    const engineerFinal = readJsonOrNull(path.join(engineerDir, "final-status.json"));
+    if (engineerFinal?.status !== "completed" || engineerFinal.degraded
+      || engineerFinal.superseded_by_user_instruction) continue;
+    const result = readJsonOrNull(path.join(engineerDir, "result.json"));
+    const proof = result?.extracted_json;
+    const receipt = proof?.final_manifest;
+    if (result?.degraded || result?.superseded_by_user_instruction
+      || proof?.execution_audit?.verdict !== "pass" || typeof receipt?.path !== "string"
+      || path.resolve(ctx.cwd, receipt.path) !== manifestPath) continue;
+    try {
+      const bytes = fs.readFileSync(manifestPath);
+      if (createHash("sha256").update(bytes).digest("hex") !== receipt.sha256) continue;
+      const manifest = JSON.parse(bytes.toString("utf8"));
+      if (manifest?.complete === true && Number.isFinite(manifest.published_success)
+        && manifest.published_success >= 0 && manifest.published_success <= 1
+        && nonEmpty(manifest.episodes) && manifest.episodes.length === manifest.target_episodes
+        && manifest.episodes.every((episode) => typeof episode?.success === "boolean")) {
+        newest = Math.max(newest, laneFinishedMs(engineerDir, engineerFinal));
+      }
+    } catch {
+      // The cited file must be readable and match the terminal receipt.
+    }
+  }
+  return newest ? Math.max(newest, selectedLeadMs(ctx)) : 0;
+}
+
+function reproductionAnchorMs(ctx) {
+  const orders = ctx.read("simulation-orders");
+  if (nonEmpty(orders.value?.simulation_orders) || selectedMaterializedSimulation(ctx).reached) {
+    return artifactMs(orders, ["updated_at"]) || selectedMaterializedSimulation(ctx).ms;
+  }
+  return (ctx.citedReproductionMs ??= citedReproductionMs(ctx));
+}
+
 function experimentData(ctx) {
   if (ctx.experimentData) return ctx.experimentData;
   const status = ctx.read("lab-director-hypothesis").value?.validation_data_status;
@@ -647,14 +708,14 @@ const MILESTONES = [
   {
     id: "reproduction_anchor",
     artifact: "simulation-orders",
-    at: (ctx) => artifactMs(ctx.read("simulation-orders"), ["updated_at"])
-      || selectedMaterializedSimulation(ctx).ms,
+    at: reproductionAnchorMs,
     // Feasibility passes a candidate only with a reproduction anchor -- one
     // number a SOTA card reports, reproduced here BEFORE the new experiment
     // (labdirector::problem_selection::feasibility). The anchor has left the
     // plan once the director has issued the orders that execute it.
     reached: (ctx) => nonEmpty(ctx.read("simulation-orders").value?.simulation_orders)
-      || selectedMaterializedSimulation(ctx).reached,
+      || selectedMaterializedSimulation(ctx).reached
+      || (ctx.citedReproductionMs ??= citedReproductionMs(ctx)) > 0,
     waiting: (ctx) => {
       const lead = ctx.read("lab-director-hypothesis").value;
       const reasons = [];

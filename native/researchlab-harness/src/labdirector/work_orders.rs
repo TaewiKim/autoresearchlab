@@ -421,6 +421,7 @@ struct EndedLane {
     role: String,
     action_type: String,
     completed: bool,
+    displaced_order_id: Option<String>,
 }
 
 /// The lanes opened for `order` that ended, completed or not, among the ended
@@ -436,7 +437,7 @@ fn lanes_of_order(order: &Value, lanes: &[EndedLane], sibling_roles: &BTreeSet<S
     let role = text(order, "role");
     let wanted = text(order, "type");
     let same_type = |lane: &&EndedLane| {
-        lane.completed == completed
+        lane.displaced_order_id.is_none() && lane.completed == completed
             && (lane.action_type == wanted
                 || (wanted == "methods_followup" && lane.action_type == "labdirector_comparator_validation_followup"))
     };
@@ -469,12 +470,39 @@ fn ended_lanes_by_brief(paths: &AppPaths, cycle_id: &str, briefs: &BTreeSet<Stri
             return Ok(());
         }
         if let Some(fields) = read_role_plan_index_fields(&role_plan_path)? {
-            if let Some(brief) = fields.source_brief_id.filter(|brief| briefs.contains(brief)) {
+            let mut brief = fields.source_brief_id;
+            let mut displaced_order_id = None;
+            // MEASURED ON cycle-a-20260919, 2026-11-22: 14 of 52
+            // completed interpretations were attempts at wo-e9fcb4a95b. The
+            // measured-contract binding replaced their brief with Runner 857,
+            // so the order never exhausted its attempts and held Engineer
+            // 1293's result back from the LabDirector. The original dispatch
+            // identity survives in review_action. Count it as unfulfilled.
+            if fields.role.as_deref() == Some("analyst")
+                && fields.action_type.as_deref() == Some("runner_result_interpretation_followup")
+            {
+                if let Some(plan) = read_role_plan_if_compact(&role_plan_path).ok().flatten() {
+                    if plan.pointer("/planner_metadata/analysis_request/source").and_then(Value::as_str)
+                        == Some("measured-contract-interpretation")
+                    {
+                        if let Some(action) = plan.pointer("/planner_metadata/review_action") {
+                            let original_brief = text(action, "brief_id");
+                            let order_id = text(action, "work_order_id");
+                            if briefs.contains(original_brief) && !order_id.is_empty() {
+                                brief = Some(original_brief.to_string());
+                                displaced_order_id = Some(order_id.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(brief) = brief.filter(|brief| briefs.contains(brief)) {
                 found.entry(brief).or_default().push(EndedLane {
                     lane_id: lane_id.to_string(),
                     role: fields.role.unwrap_or_default(),
                     action_type: fields.action_type.unwrap_or_default(),
                     completed,
+                    displaced_order_id,
                 });
             }
         }
@@ -655,7 +683,10 @@ pub(crate) fn refresh_work_orders(paths: &AppPaths, cycle_id: &str) -> Result<Va
             .collect();
         let lanes = ended.get(text(order, "brief_id")).map(Vec::as_slice).unwrap_or(&[]);
         let carried_out = lanes_of_order(order, lanes, &siblings, true);
-        let gave_up = lanes_of_order(order, lanes, &siblings, false);
+        let mut gave_up = lanes_of_order(order, lanes, &siblings, false);
+        gave_up.extend(lanes.iter()
+            .filter(|lane| lane.displaced_order_id.as_deref() == Some(text(order, "order_id")))
+            .map(|lane| lane.lane_id.clone()));
         if !carried_out.is_empty() {
             order["done_at"] = json!(now_iso());
             order["done_lanes"] = json!(carried_out);
@@ -1506,6 +1537,7 @@ mod tests {
             role: role.to_string(),
             action_type: action_type.to_string(),
             completed,
+            displaced_order_id: None,
         };
         let lanes = vec![
             lane("e1", "engineer", "capability_provisioning_followup", false),
@@ -1525,6 +1557,142 @@ mod tests {
 
     fn carried_out(order_id: &str, done_at: &str) -> Value {
         json!({"order_id": order_id, "role": "scout", "type": "novelty_followup", "status": "standing", "outcome": "carried_out", "done_at": done_at, "done_lanes": ["followup-scout-746"], "reported_at": null})
+    }
+
+    #[test]
+    fn displaced_analyst_order_returns_completed_engineering_work_to_the_director() {
+        // MEASURED ON cycle-a-20260919, 2026-11-22: with the anchor
+        // complete and the visual order withdrawn, 52 interpretations finished.
+        // Fourteen carried the standing analyst order's ID but interpreted the
+        // old runner instead. This prevented delivery of Engineer 1293's result.
+        let (_temp, paths) = fixture();
+        let cycle = "cycle-a-20260919";
+        let issuer = "followup-lab-director-2077";
+        let brief = format!("labdirector-next-action-{issuer}");
+        let stamp = |minutes| (Utc::now() - chrono::Duration::minutes(minutes))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let state = |kind: &str, value: Value| {
+            write_json(&state_root(&paths).join(format!("{cycle}-{kind}.json")), &value).unwrap();
+        };
+        for (kind, value) in [
+            ("field-landscape", json!({"subfields": [{}]})),
+            ("frontier-harvest", json!({"top_k": []})),
+            ("sota-cards", json!({"cards": [{}]})),
+            ("field-beliefs", json!({"beliefs": [{}]})),
+            ("candidate-slate", json!({"candidates": [{}]})),
+            ("expert-panel", json!({"ranking": [{}]})),
+            ("novelty-audit", json!({"audits": [{}]})),
+            ("candidate-feasibility", json!({"assessments": [{}]})),
+            ("owner-candidates", json!({"published_at": stamp(1100), "candidates": [{}]})),
+            ("owner-selection", json!({"candidate_id": "c1"})),
+            ("lab-director-hypothesis", json!({"status": "selected", "statement": "the coverage lead",
+                "selected_at_epoch_ms": at(&stamp(1004)).timestamp_millis(), "generated_by": issuer,
+                "projection_source": "lab_director_lane_result", "validation_data_status": "needs_materialization",
+                "dataset_or_accession": "common_support_pose_v1"})),
+            ("simulation-orders", json!({"generated_by": issuer, "updated_at": stamp(104), "simulation_orders": null})),
+        ] {
+            state(kind, value);
+        }
+        let terminal = |id: &str, minutes| {
+            let dir = lane_root(&paths, cycle, id);
+            write_json(&dir.join("final-status.json"), &json!({"lane_id": id,
+                "status": "completed", "completed_at": stamp(minutes)})).unwrap();
+            dir
+        };
+        let anchor_id = "followup-engineer-1272";
+        let anchor_manifest = paths.runtime_root.join(format!("artifacts/{cycle}/{anchor_id}/reproduction/manifest.json"));
+        write_json(&anchor_manifest, &json!({"complete": true, "published_success": 0.654,
+            "target_episodes": 500, "episodes": (0..500).map(|i| json!({"success": i < 334})).collect::<Vec<_>>()})).unwrap();
+        write_json(&terminal(anchor_id, 1100).join("result.json"), &json!({"extracted_json": {
+            "execution_audit": {"verdict": "pass"}, "final_manifest": {"path": anchor_manifest,
+                "sha256": sha256_hex(&fs::read(&anchor_manifest).unwrap())}
+        }})).unwrap();
+        write_json(&terminal(issuer, 104).join("lab-director-research-notes.json"), &json!({
+            "cycle_id": cycle, "evidence_snapshot": [{"source": anchor_manifest}]
+        })).unwrap();
+        let engineer = terminal("followup-engineer-1293", 100);
+        write_json(&engineer.join("result.json"), &json!({"extracted_json": {
+            "capability_blockers": [{"requirement": "complete compact-state qualification", "why_unsatisfiable": "preflight incomplete"}]
+        }})).unwrap();
+        let mut ledger = empty_ledger();
+        ledger["watermark"] = json!(stamp(104));
+        let mut engineering = carried_out("wo-0ade6f081d", &stamp(100));
+        engineering["role"] = json!("engineer");
+        engineering["type"] = json!(CAPABILITY_PROVISIONING_ACTION);
+        engineering["done_lanes"] = json!(["followup-engineer-1293"]);
+        orders_mut(&mut ledger).extend([engineering, json!({
+            "order_id": "wo-e9fcb4a95b", "issued_by": issuer, "brief_id": brief,
+            "description": "Project precision once compact-state development yields block and cost receipts",
+            "issued_at": stamp(104), "recorded_at": stamp(104), "type": "methods_followup", "role": "analyst",
+            "lead_key": lead_key(&paths, cycle), "status": "standing", "done_at": null, "reported_at": null,
+        })]);
+        write_json(&work_orders_path(&paths, cycle), &ledger).unwrap();
+        let visual = paths.runtime_root.join(format!("datasets/{cycle}/simulations/common_support_pose_v1"));
+        write_json(&visual.join("manifest.json"), &json!({"request_id": "common_support_pose_v1", "rows": 0,
+            "pilot": {"passed": false}})).unwrap();
+        fs::write(visual.join("episodes.csv"), "episode_id,success\n").unwrap();
+        let mut statuses = Vec::new();
+        for i in 0..52 {
+            let lane_id = format!("followup-analyst-{}", 1563 + i);
+            let dir = terminal(&lane_id, 53 - i);
+            statuses.push(json!({"lane_id": lane_id, "role": "analyst", "status": "completed"}));
+            write_json(&dir.join("role-plan.json"), &json!({
+                "role": "analyst", "action_type": "runner_result_interpretation_followup", "source_brief_id": "followup-runner-857",
+                "planner_metadata": {
+                    "analysis_request": {"source": "measured-contract-interpretation", "runner_lane_id": "followup-runner-857"},
+                    "review_action": (i >= 38).then(|| json!({"brief_id": brief, "work_order_id": "wo-e9fcb4a95b",
+                        "type": "labdirector_comparator_validation_followup"})),
+                },
+            })).unwrap();
+        }
+        state("cycle-run-state", json!({"lane_statuses": statuses}));
+        let progress = || {
+            let output = std::process::Command::new("node")
+                .arg("-e").arg(r#"
+                    const m = require(process.argv[1]);
+                    const p = m.deriveProgress({cwd: process.argv[2], cycleId: process.argv[3]});
+                    console.log(JSON.stringify({progress: p, findings: m.stallFindings({progress: p, config: m.supervisorConfig({})})}));
+                "#)
+                .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../src/orchestrator/cycle_progress.js"))
+                .arg(&paths.project_root).arg(cycle).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            serde_json::from_slice::<Value>(&output.stdout).unwrap()
+        };
+        let stuck = progress();
+        assert_eq!(stuck["progress"]["current_milestone"], "reproduction_anchor");
+        assert_eq!(stuck["progress"]["next_milestone"], "experiment_data");
+        assert_eq!(stuck["progress"]["waiting_on"], json!(["lead_validation_data_status=needs_materialization"]));
+        assert_eq!(stuck["progress"]["lanes_since_milestone"]["by_action_type"]["runner_result_interpretation_followup"]["total"], 52);
+        assert!(stuck["findings"].as_array().unwrap().iter().any(|item|
+            item["signature"] == "lane_churn:reproduction_anchor:runner_result_interpretation_followup"));
+        assert!(work_orders_in_flight(&paths, cycle));
+
+        let announcement = announce_work_order_results(&paths, cycle).unwrap();
+        assert_eq!(announcement.len(), 1, "deliver the existing results without another attempt at either order");
+        let updated = load_ledger(&paths, cycle);
+        let analyst = &orders(&updated)[1];
+        assert_eq!(analyst["outcome"], "not_carried_out");
+        assert_eq!(analyst["done_lanes"].as_array().unwrap().len(), 14);
+        assert_eq!(orders(&updated)[0]["announced_to"], analyst["announced_to"]);
+        let director = announcement[0]["lane_id"].as_str().unwrap();
+        let plan = read_json(&lane_root(&paths, cycle, director).join("role-plan.json")).unwrap();
+        let message = plan["planner_metadata"]["supervisor_instruction"]["message"].as_str().unwrap();
+        assert!(message.contains("followup-engineer-1293/result.json"));
+        assert!(message.contains("wo-e9fcb4a95b") && message.contains("COULD NOT BE CARRIED OUT"));
+        assert_eq!(progress()["progress"]["current_milestone"], "reproduction_anchor");
+
+        // Replay a Director-authorized successor and a qualifying output only
+        // after the missing handback. The failed visual work cannot supply data.
+        let relative = format!(".research-lab/datasets/{cycle}/simulations/compact_state/episodes.csv");
+        record_lab_director_simulation_orders(&paths, cycle, director, &json!({"simulation_orders": [{
+            "request_id": "compact_state", "output_path": relative, "emitted_columns": [{"name": "success"}]
+        }]})).unwrap();
+        let csv = paths.project_root.join(relative);
+        write_json(&csv.with_file_name("manifest.json"), &json!({"request_id": "compact_state", "rows": 2,
+            "in_support_validation": {"passed": true, "arms": [{"in_support_success_rate": 1.0}]}
+        })).unwrap();
+        fs::write(csv, "episode_id,success\n1,1\n2,0\n").unwrap();
+        assert_eq!(progress()["progress"]["current_milestone"], "experiment_data");
     }
 
     fn at(iso: &str) -> DateTime<Utc> {

@@ -1191,7 +1191,7 @@ fn with_design_memory_fields(mut schema: Value) -> Value {
     add_reopening(&mut schema["properties"]["replacement_hypotheses"]["items"]);
     schema["properties"]["commitment_updates"] = json!({
         "type": ["array", "null"],
-        "description": "What this decision binds later directors to, or changes in what earlier ones bound you to (planner_metadata.commitments). add: a claim that stands on its own. supersede: the id being replaced, the new claim and the reason. withdraw: the id and the reason. Null or empty when nothing changes.",
+        "description": "What this decision binds later directors to, or changes in what earlier ones bound you to (planner_metadata.commitments). add: a claim that stands on its own -- an amendment accepted, a prerequisite declared met, a term of the validation fixed. supersede: the id being replaced, the new claim and the reason. withdraw: the id and the reason. A term that must keep holding goes here once instead of being repeated in validation_changes. Null only when this decision fixes nothing new and ends nothing.",
         "items": {
             "type": "object",
             "properties": {

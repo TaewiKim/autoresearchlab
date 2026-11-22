@@ -15,6 +15,7 @@
 // These tests are that window, in fixtures.
 
 const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -143,6 +144,86 @@ function addFinishedLane(cwd, { laneId, actionType, status = "completed", finish
 
 // ---------------------------------------------------------------------------
 // milestone derivation
+
+test("the completed reproduction survives withdrawal of the failed experiment order", (t) => {
+  // MEASURED ON cycle-a-20260919, 2026-11-22: Director 2077 cited
+  // Engineer 1272's completed reproduction and withdrew the failed visual
+  // order. Eleven capability lanes were attributed to waiting for the anchor.
+  const cwd = buildCycle("lead_selected");
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  const now = Date.parse("2026-11-22T02:40:12Z");
+  const selectedAt = Date.parse("2026-11-21T11:13:41Z");
+  const directorId = "followup-lab-director-2077";
+  const engineerId = "followup-engineer-1272";
+  const director = addFinishedLane(cwd, {
+    laneId: directorId, actionType: "blocking_lane_recovery_planning", finishedMs: now - 26 * MINUTE,
+  });
+  const engineer = addFinishedLane(cwd, {
+    laneId: engineerId, actionType: "capability_provisioning_followup",
+    finishedMs: Date.parse("2026-11-18T05:05:36Z"),
+  });
+  writeState(cwd, "lab-director-hypothesis", {
+    status: "selected", statement: "coverage explains the performance gap", selected_at_epoch_ms: selectedAt,
+    projection_source: "lab_director_lane_result", generated_by: directorId,
+    validation_data_status: "needs_materialization", dataset_or_accession: "common_support_pose_v1",
+  });
+  writeState(cwd, "simulation-orders", {
+    generated_by: directorId, updated_at: "2026-11-22T02:14:30Z", simulation_orders: null,
+  });
+  for (let i = 0; i < 11; i += 1) {
+    addFinishedLane(cwd, {
+      laneId: `followup-engineer-${1283 + i}`, actionType: "capability_provisioning_followup",
+      status: i === 4 ? "failed" : "completed", finishedMs: now - (25 - i) * MINUTE,
+    });
+  }
+  const manifestRef = `.research-lab/artifacts/${CYCLE}/${engineerId}/reproduction/manifest.json`;
+  const manifestPath = path.join(cwd, manifestRef);
+  const manifest = {
+    target_episodes: 500, published_success: 0.654,
+    episodes: Array.from({ length: 500 }, (_, i) => ({ success: i < 334 })),
+  };
+  const writeReceipt = (complete) => {
+    writeJson(manifestPath, { ...manifest, complete });
+    const sha256 = createHash("sha256").update(fs.readFileSync(manifestPath)).digest("hex");
+    writeJson(path.join(engineer, "result.json"), { extracted_json: {
+      final_manifest: { path: manifestPath, sha256 }, execution_audit: { verdict: "pass" },
+    } });
+  };
+  writeJson(path.join(director, "lab-director-research-notes.json"), {
+    cycle_id: CYCLE,
+    evidence_snapshot: [{ source: manifestRef }],
+  });
+  const csv = path.join(cwd, ".research-lab", "datasets", CYCLE, "simulations", "common_support_pose_v1", "episodes.csv");
+  writeJson(path.join(path.dirname(csv), "manifest.json"), {
+    request_id: "common_support_pose_v1", rows: 0, pilot: { passed: false },
+  });
+  fs.writeFileSync(csv, "episode_id,success\n");
+  const derive = () => deriveProgress({ cwd, cycleId: CYCLE, now });
+  const record = () => recordProgress({ cwd, cycleId: CYCLE, now }).progress;
+  const findings = (progress) => stallFindings({ progress, config: supervisorConfig({}), now });
+
+  writeReceipt(false);
+  const stuck = record();
+  assert.equal(stuck.current_milestone, "lead_selected");
+  assert.deepEqual(stuck.waiting_on, ["lead_validation_data_status=needs_materialization"]);
+  assert.equal(stuck.lanes_since_milestone.by_action_type.capability_provisioning_followup.total, 11);
+  const signature = "lane_churn:lead_selected:capability_provisioning_followup";
+  assert.ok(findings(stuck).some((finding) => finding.signature === signature));
+
+  writeReceipt(true);
+  const advanced = record();
+  assert.equal(advanced.current_milestone, "reproduction_anchor");
+  assert.equal(advanced.previous_milestone, "lead_selected");
+  assert.equal(advanced.next_milestone, "experiment_data");
+  assert.equal(advanced.reached_at, new Date(selectedAt).toISOString());
+  assert.ok(findings(advanced).some((finding) => finding.signature === "lane_churn:reproduction_anchor:capability_provisioning_followup"));
+
+  fs.appendFileSync(manifestPath, "\n");
+  assert.equal(derive().current_milestone, "lead_selected", "a changed manifest cannot satisfy the anchor");
+  writeReceipt(true);
+  fs.rmSync(path.join(director, "lab-director-research-notes.json"));
+  assert.equal(derive().current_milestone, "lead_selected", "the accepted Director must cite the receipt");
+});
 
 test("the milestone list is the pipeline the harness actually publishes", () => {
   assert.deepEqual(MILESTONE_IDS, [
