@@ -40,8 +40,10 @@ const ENDED_SHOWN: usize = 6;
 const FEEDBACK_KEPT: usize = 8;
 /// How many directors in a row must state a term before the harness records it.
 const RESTATED_BY: usize = 3;
-/// Word overlap (Jaccard) at which two wordings are the same term.
-const SAME_TERM: f64 = 0.7;
+/// Word overlap (Jaccard) at which two wordings are the same term. MEASURED:
+/// director 2086 reworded the seeds term of 2084 and 2085 ("the reserved ...,
+/// and the historical panel's retirement") to an overlap of 0.65.
+const SAME_TERM: f64 = 0.6;
 
 pub(crate) fn commitments_path(paths: &AppPaths, cycle_id: &str) -> PathBuf {
     state_root(paths).join(format!("{cycle_id}-commitments.json"))
@@ -475,6 +477,14 @@ mod tests {
         let id = seeds_id(&register);
         apply_commitment_updates(&mut register, "d2090", "2026-11-23T00:00:00Z", &[json!({"op": "withdraw", "id": id, "reason": "the visual panel was retired with its seeds"})]);
         assert!(!standing(&register).iter().any(|claim| claim.contains("pilot seeds")));
+    }
+
+    #[test]
+    fn a_reworded_term_is_the_same_term_and_a_different_one_is_not() {
+        let earlier = "Preserve visual pilot seeds [100,101] and unused visual confirmation seeds [0-7].";
+        assert!(same_term(earlier, "Preserve the reserved visual pilot seeds [100,101], unused visual confirmation seeds [0-7], and the historical panel's retirement."));
+        assert!(!same_term(earlier, "Use the existing compact-state development seeds only for corrective qualification."));
+        assert!(said_by(earlier, "Archive both failed qualifications as development evidence. Preserve visual pilot seeds [100,101] and unused visual confirmation seeds [0-7]."));
     }
 
     fn seeds_id(register: &Value) -> String {
