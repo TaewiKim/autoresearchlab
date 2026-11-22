@@ -549,6 +549,18 @@ pub(crate) fn run_external_driver(
         if role_plan_path.exists() {
             command.arg("--role-plan-file").arg(&role_plan_path);
         }
+        if contract.role == "lab-runner" {
+            let served_execution_env = "RESEARCHLAB_SERVED_HANDOFF_EXECUTION_ID";
+            command.env_remove(served_execution_env);
+            // MEASURED ON cycle-a-20260919, 2026-11-22: runner 860
+            // was already queued when runner 859 measured analyst 1655's
+            // handoff. Check the execution again when the driver selects it.
+            if let Some(id) = crate::labdirector::latest_measured_handoff_execution_id(
+                paths, &contract.cycle_id,
+            )? {
+                command.env(served_execution_env, id);
+            }
+        }
         paths.stats_driver_script.clone()
     };
 
@@ -630,6 +642,13 @@ pub(crate) fn run_external_driver(
     if let Some(role_plan) = role_plan {
         payload["role_plan"] = compact_role_plan_for_lane_result(role_plan);
         payload["role_plan_path"] = json!(role_plan_path);
+    }
+    if contract.role == "lab-runner"
+        && payload["status"] == "aborted"
+        && payload["failure_category"] == "handoff_execution_already_measured"
+    {
+        let artifacts = vec![output_dir.join("result.json").display().to_string()];
+        return Ok(("aborted".to_string(), payload, stdout, stderr, artifacts));
     }
     if let Some(status) = mark_pending_literature_recovery(
         &mut payload,

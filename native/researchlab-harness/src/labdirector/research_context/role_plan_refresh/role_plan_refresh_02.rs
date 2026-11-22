@@ -7,6 +7,20 @@ pub(crate) fn latest_lab_runner_context_for_handoff(
     cycle_id: &str,
     handoff_path: &str,
 ) -> Result<Option<Value>> {
+    if let Some((context, _)) =
+        latest_exact_lab_runner_context_for_handoff(paths, cycle_id, handoff_path)?
+    {
+        return Ok(Some(context));
+    }
+    latest_lab_runner_context_for_equivalent_handoff(paths, cycle_id, handoff_path)
+}
+
+/// Return the exact runner context and whether its result records a measurement.
+pub(crate) fn latest_exact_lab_runner_context_for_handoff(
+    paths: &AppPaths,
+    cycle_id: &str,
+    handoff_path: &str,
+) -> Result<Option<(Value, bool)>> {
     let handoff_key = normalized_path_key(handoff_path);
     let handoff_modified_at = fs::metadata(handoff_path)
         .and_then(|meta| meta.modified())
@@ -99,6 +113,7 @@ pub(crate) fn latest_lab_runner_context_for_handoff(
             failed_checks,
             overall_status,
             external_agent_runs_total,
+            measured_execution,
         ) = if result_size > 16 * 1024 * 1024 {
             (
                 handoff_path.to_string(),
@@ -113,6 +128,7 @@ pub(crate) fn latest_lab_runner_context_for_handoff(
                 json!([]),
                 json!("unknown_large_result_unparsed"),
                 Value::Null,
+                false,
             )
         } else {
             let result: Value = read_json(&result_path)?;
@@ -168,6 +184,15 @@ pub(crate) fn latest_lab_runner_context_for_handoff(
                 .or_else(|| result.get("external_agent_runs_total"))
                 .cloned()
                 .unwrap_or(Value::Null);
+            // A completed lane can still have produced no measurement. Only
+            // use an actual execution record to suppress another launch.
+            let measured_execution = result
+                .get("executed_handoff_path")
+                .and_then(Value::as_str)
+                .is_some_and(|path| !path.trim().is_empty())
+                && result.get("failure_category").and_then(Value::as_str)
+                    != Some("no_measurement_produced")
+                && crate::runtime::handoff_seal::result_measured_something(&result);
             (
                 result_handoff_path.to_string(),
                 validation_summary,
@@ -181,10 +206,11 @@ pub(crate) fn latest_lab_runner_context_for_handoff(
                 failed_checks,
                 overall_status,
                 external_agent_runs_total,
+                measured_execution,
             )
         };
         let lane_id = fallback_lane_id;
-        return Ok(Some(json!({
+        let context = json!({
             "lane_id": lane_id,
             "result_path": result_path.display().to_string(),
             "analyst_handoff_path": result_handoff_path,
@@ -200,9 +226,10 @@ pub(crate) fn latest_lab_runner_context_for_handoff(
             "blueprints_failed": blueprints_failed,
             "failed_checks": failed_checks,
             "external_agent_runs_total": external_agent_runs_total,
-        })));
+        });
+        return Ok(Some((context, measured_execution)));
     }
-    latest_lab_runner_context_for_equivalent_handoff(paths, cycle_id, handoff_path)
+    Ok(None)
 }
 
 pub(crate) fn runner_context_is_exact_handoff(context: &Value, handoff_path: &str) -> bool {

@@ -38,6 +38,7 @@ def run_driver(
     output_dir: Path,
     task_file: Optional[Path],
     role_plan_file: Optional[Path],
+    served_execution_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     role_plan = _read_json(role_plan_file)
@@ -54,6 +55,20 @@ def run_driver(
     embedded_handoff = _find_analyst_handoff(role_plan)
     latest_handoff = _find_latest_handoff_from_cycle(role_plan, role_plan_file)
     handoff = _select_analyst_handoff(embedded_handoff, latest_handoff, role_plan_file)
+    # MEASURED ON cycle-a-20260919, 2026-11-22: queued runner 860
+    # selected the same sealed handoff runner 859 had just measured. Compare
+    # the execution actually selected, since a queued plan can lack a handoff.
+    seal = handoff.get("handoff_seal")
+    if (served_execution_id and isinstance(seal, dict) and seal.get("status") == "sealed"
+            and seal.get("execution_id") == served_execution_id):
+        result = {
+            "status": "aborted",
+            "driver": DRIVER_NAME,
+            "failure_category": "handoff_execution_already_measured",
+            "superseded_execution_id": served_execution_id,
+        }
+        _write_json(output_dir / "result.json", result)
+        return result
     canonical_contract = current_contract(role_plan_file)
     contract_binding = preflight(handoff, canonical_contract, role_plan_file)
     executed_handoff_path = handoff.get("_source_path") or (role_plan or {}).get("planner_metadata", {}).get("analysis_request", {}).get("handoff_path")
@@ -475,6 +490,7 @@ def main() -> int:
             Path(args.output_dir),
             Path(args.task_file) if args.task_file else None,
             Path(args.role_plan_file) if args.role_plan_file else None,
+            served_execution_id=os.environ.pop("RESEARCHLAB_SERVED_HANDOFF_EXECUTION_ID", None),
         )
         validation_summary = result.get("validation_summary")
         stdout_summary = {

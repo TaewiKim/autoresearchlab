@@ -579,7 +579,7 @@ fn execution_id_at(path: &Path) -> Option<String> {
 /// the same code on the same data may be retried, e.g. after an engineer fixed
 /// the environment. Same rule as the evidence picker's
 /// isFailedExecutionNotEvidence.
-fn result_measured_something(result: &Value) -> bool {
+pub(crate) fn result_measured_something(result: &Value) -> bool {
     if result.get("status").and_then(Value::as_str) != Some("failed") {
         return true;
     }

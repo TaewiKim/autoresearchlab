@@ -96,6 +96,34 @@ pub(crate) fn work_order_dispatchable(role: &str, action_type: &str) -> bool {
     )
 }
 
+/// The type under which the harness dispatches a director's action, if it can.
+///
+/// MEASURED ON cycle-a-20260919, 2026-11-22: director 2092 ordered an
+/// engineer to recover contact onset from saved telemetry and labelled the action
+/// `methods_followup`. Only `capability_provisioning_followup` reaches an engineer,
+/// so the order was dropped without a word -- nine such orders in this cycle --
+/// and with no order standing nothing called the next director: for two and a
+/// half hours the cycle ran the same blocked analyst assignment sixteen times.
+/// The role says who is to do the work; the type is this harness's routing label,
+/// and an engineer has one route.
+fn dispatch_type(role: &str, action_type: &str) -> Option<&'static str> {
+    const TYPES: [&str; 6] = [
+        "methods_followup",
+        "chronicle_evidence_request_followup",
+        "data_acquisition_followup",
+        "novelty_followup",
+        "gate_restart_followup",
+        "impact_followup",
+    ];
+    if work_order_dispatchable(role, action_type) {
+        return TYPES.iter().copied().chain([CAPABILITY_PROVISIONING_ACTION]).find(|known| *known == action_type);
+    }
+    (role == "engineer" && !action_type.is_empty() && action_type != CANCEL_WORK_ORDER_ACTION).then_some(CAPABILITY_PROVISIONING_ACTION)
+}
+
+const NOT_ACCEPTED_KEPT: usize = 6;
+const NOT_ACCEPTED_SHOWN_HOURS: i64 = 24;
+
 pub(crate) fn parse_time(value: Option<&Value>) -> Option<DateTime<Utc>> {
     value
         .and_then(Value::as_str)
@@ -305,11 +333,33 @@ fn ingest_director_seeing(
     let mut issued = 0usize;
     for action in &actions {
         let role = text(action, "preferred_role");
-        let action_type = text(action, "type");
+        let director_type = text(action, "type");
         let description = text(action, "description").trim();
-        if description.is_empty() || !work_order_dispatchable(role, action_type) {
+        if description.is_empty() || director_type == CANCEL_WORK_ORDER_ACTION {
             continue;
         }
+        let Some(action_type) = dispatch_type(role, director_type) else {
+            // An action no lane will be opened for is told back to the next
+            // director instead of vanishing.
+            let already = ledger.get("not_accepted").and_then(Value::as_array).is_some_and(|kept| {
+                kept.iter().any(|item| text(item, "by") == lane_id && text(item, "role") == role && text(item, "type") == director_type)
+            });
+            if !already {
+                let mut kept = ledger.get("not_accepted").and_then(Value::as_array).cloned().unwrap_or_default();
+                kept.push(json!({
+                    "by": lane_id,
+                    "at": completed_at,
+                    "role": role,
+                    "type": director_type,
+                    "what": description.chars().take(200).collect::<String>(),
+                }));
+                let excess = kept.len().saturating_sub(NOT_ACCEPTED_KEPT);
+                kept.drain(..excess);
+                ledger["not_accepted"] = Value::Array(kept);
+                changed = true;
+            }
+            continue;
+        };
         let id = order_id(lane_id, role, action_type, description);
         if orders(ledger).iter().any(|order| text(order, "order_id") == id) {
             continue;
@@ -348,6 +398,9 @@ fn ingest_director_seeing(
             if let Some(value) = action.get(key) {
                 record[key] = value.clone();
             }
+        }
+        if director_type != action_type {
+            record["director_type"] = json!(director_type);
         }
         orders_mut(ledger).push(record);
         issued += 1;
@@ -1011,14 +1064,31 @@ pub(crate) fn work_orders_director_context(paths: &AppPaths, cycle_id: &str) -> 
         .take(6)
         .map(|order| json!({"order_id": order.get("order_id"), "role": order.get("role"), "type": order.get("type"), "status": order.get("status"), "why": order.get("closed_reason")}))
         .collect();
-    json!({
+    let recent = Utc::now() - chrono::Duration::hours(NOT_ACCEPTED_SHOWN_HOURS);
+    let not_accepted: Vec<Value> = ledger
+        .get("not_accepted")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| parse_time(item.get("at")).is_some_and(|at| at >= recent))
+        .cloned()
+        .collect();
+    let mut context = json!({
         "standing": standing,
         "recently_closed": closed,
         "host_memory": host_memory_facts(paths, cycle_id),
         "gpu_route": gpu_route_fact(),
         "rule": "A next action you issue is a standing work order: it stays in force until a lane carries it out, however many director lanes run in between. Do not re-issue an order listed under `standing` unless you want its wording replaced; a new order for the same role and type replaces the older one. To withdraw one, add a next action {\"type\": \"cancel_work_order\", \"preferred_role\": \"lab-director\", \"description\": \"<order_id>: why\"}. Returning an empty next_actions list cancels nothing.",
         "capability_route": "When a design needs software, an environment, a loader revision or a checkpoint that is not installed here, that is an order, not a blocker to restate: issue {\"type\": \"capability_provisioning_followup\", \"preferred_role\": \"engineer\", \"description\": \"what must run, at which versions, and the command that would prove it\"}. By owner decision engineer lanes -- and only engineer lanes -- may install open-source packages and fetch released code and models from the approved package indexes, code hosts and model hubs. Requirements an analyst handoff declares as engineer-owned and unavailable are ordered automatically.",
-    })
+        "engineer_route": "Any work you address to an engineer -- a diagnostic, a replay, a fix, an install -- is dispatched to one engineer lane whatever `type` you give it, and is listed here as capability_provisioning_followup.",
+    });
+    if !not_accepted.is_empty() {
+        context["not_accepted"] = json!({
+            "actions": not_accepted,
+            "rule": "No lane was opened for these next actions: the harness has no route for that role and type together. Nothing is being done about them. Re-issue the work to a role that carries out orders: analyst or lab-runner (methods_followup), scout (novelty_followup, data_acquisition_followup), engineer (any type), chronicle (chronicle_evidence_request_followup), gatekeeper (novelty_followup, gate_restart_followup).",
+        });
+    }
+    context
 }
 
 /// Reopen an order closed as superseded by a director that could not have seen it.
@@ -1327,6 +1397,36 @@ mod tests {
 
     // The measured failure: 1913 ordered a scout audit and a reproduction, and
     // 1914..1922 said nothing about either.
+    // MEASURED: director 2092's engineer order, labelled methods_followup, was
+    // dropped and nothing told the next director.
+    #[test]
+    fn an_order_addressed_to_an_engineer_stands_whatever_type_the_director_gave_it() {
+        let mut ledger = empty_ledger();
+        let payload = json!({"next_actions": [
+            {"type": "methods_followup", "preferred_role": "engineer", "description": "Recover contact onset on the paired development resets from existing telemetry. Cap work at 15 CPU minutes."},
+            {"type": "hypothesis_followup", "preferred_role": "lab-director", "description": "reconsider the lead"},
+        ]});
+        assert!(ingest_director(&mut ledger, "followup-lab-director-2092", "2026-11-22T09:59:45Z", &payload, "lead"));
+        let standing: Vec<&Value> = orders(&ledger).iter().filter(|order| is_standing(order)).collect();
+        assert_eq!(standing.len(), 1);
+        assert_eq!(text(standing[0], "role"), "engineer");
+        assert_eq!(text(standing[0], "type"), CAPABILITY_PROVISIONING_ACTION);
+        assert_eq!(text(standing[0], "director_type"), "methods_followup");
+        assert_eq!(text(standing[0], "brief_id"), "labdirector-next-action-followup-lab-director-2092");
+        // What has no route is kept to be told back, once.
+        let kept = ledger["not_accepted"].as_array().unwrap().clone();
+        assert_eq!(kept.len(), 1);
+        assert_eq!((text(&kept[0], "role"), text(&kept[0], "type")), ("lab-director", "hypothesis_followup"));
+        assert!(!ingest_director(&mut ledger, "followup-lab-director-2092", "2026-11-22T09:59:45Z", &payload, "lead"), "reading the same decision again changes nothing");
+        // A cancellation is not an order with no route.
+        ingest_director(&mut ledger, "d2", "2026-11-22T10:30:00Z", &json!({"next_actions": [{"type": "cancel_work_order", "preferred_role": "lab-director", "description": "wo-000: done"}]}), "lead");
+        assert_eq!(ledger["not_accepted"].as_array().unwrap().len(), 1);
+        // The types the harness already routed are unchanged.
+        assert_eq!(dispatch_type("scout", "novelty_followup"), Some("novelty_followup"));
+        assert_eq!(dispatch_type("engineer", CAPABILITY_PROVISIONING_ACTION), Some(CAPABILITY_PROVISIONING_ACTION));
+        assert_eq!(dispatch_type("analyst", "hypothesis_followup"), None);
+    }
+
     #[test]
     fn an_order_stands_through_later_directors_that_do_not_mention_it() {
         let mut ledger = empty_ledger();

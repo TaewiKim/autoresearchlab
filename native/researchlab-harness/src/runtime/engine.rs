@@ -447,6 +447,7 @@ pub fn run_lane(paths: &AppPaths, contract_path: &Path) -> Result<HarnessResult>
             let event_type = match status.as_str() {
                 "completed" => "lane_completed",
                 "failed" => "lane_failed",
+                "aborted" => "lane_superseded",
                 _ => "lane_prepared",
             };
             append_event(

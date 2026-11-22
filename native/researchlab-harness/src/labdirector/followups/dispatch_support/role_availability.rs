@@ -71,6 +71,26 @@ pub(crate) fn latest_executable_analyst_handoff_served(
     Ok(Some(!handoff_waiting_for_runner(paths, cycle_id, &handoff_path)?))
 }
 
+pub(crate) fn latest_measured_handoff_execution_id(
+    paths: &AppPaths,
+    cycle_id: &str,
+) -> Result<Option<String>> {
+    let Some(signal) = latest_analyst_handoff_signal(paths, cycle_id)? else {
+        return Ok(None);
+    };
+    let (Some(handoff_path), Some(execution_id)) = (
+        signal.get("path").and_then(Value::as_str),
+        signal
+            .pointer("/payload/handoff_seal/execution_id")
+            .and_then(Value::as_str),
+    ) else {
+        return Ok(None);
+    };
+    let measured = latest_exact_lab_runner_context_for_handoff(paths, cycle_id, handoff_path)?
+        .is_some_and(|(_, measured)| measured);
+    Ok(measured.then(|| execution_id.to_string()))
+}
+
 pub(crate) struct FollowupRoleAvailabilityContext<'a> {
     pub(crate) external_validation_required: bool,
     pub(crate) gate_independence_required: bool,

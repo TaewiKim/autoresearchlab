@@ -152,7 +152,8 @@ def _is_recorded_invalid_design(run, rows, contract):
                 r"[a-z0-9]+", f"{gate_id or ''} {gate.get('registered_threshold', '')}".lower()))
             boolean_matches = [(key, expected) for key, expected in boolean_gates.items()
                                if set(re.findall(r"[a-z0-9]+", key.lower())) <= emitted_tokens]
-            observed_text = str(gate.get("observed", gate.get("observed_value", ""))).strip().lower()
+            observed_text = str(gate.get(
+                "observed", gate.get("observed_value", gate.get("value", "")))).strip().lower()
             observed_boolean = ({"true": True, "1": True, "false": False, "0": False}
                                 .get(observed_text))
             if (len(boolean_matches) == 1
@@ -198,7 +199,12 @@ def _is_recorded_invalid_design(run, rows, contract):
             if not structured_match and not textual_match:
                 continue
             try:
-                observed = float(gate.get("observed", gate.get("observed_value")))
+                # MEASURED ON cycle-a-20260919, 2026-10-30: runner
+                # 840 recorded its failed canonical paired-cell gate in the
+                # `value` column, so the verifier discarded the measurement
+                # and falsely reported primary_contrast_estimates_missing.
+                observed = float(gate.get(
+                    "observed", gate.get("observed_value", gate.get("value"))))
             except (TypeError, ValueError):
                 # An unmeasurable prerequisite is itself useful audit output,
                 # but it must not hide a later, numeric canonical gate failure.

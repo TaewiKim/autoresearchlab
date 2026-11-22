@@ -1,18 +1,73 @@
 import csv
+from contextlib import redirect_stdout
+from io import StringIO
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 import hashlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'drivers/analysis'))
 from python_stats_lib.analysis_contract import preflight, verify_outputs
 from python_stats_lib.blueprint_model import Blueprint
 from python_stats_lib.blueprint_run import _run_blueprint
+from python_stats_lib.entrypoint import main, run_driver
 import json
 
 class AnalysisContractTests(unittest.TestCase):
+    def test_queued_runners_do_not_execute_the_already_measured_supporting_handoff(self):
+        # MEASURED ON cycle-a-20260919, 2026-11-22: unbound runner
+        # 860 and bound runner 861 both selected analyst 1655's sealed check
+        # after runner 859 had already completed it.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lanes = root / ".research-lab" / "lanes" / "cycle-a-20260919"
+            handoff_path = lanes / "followup-analyst-1655" / "handoff-validation-plan.json"
+            handoff_path.parent.mkdir(parents=True)
+            execution_id = "dff9cc37026d7565294c1094acb812e5c8af1908c9ff9fec30127cabf3479eec"
+            check = "development_endpoint_tolerance_1655"
+            handoff = {
+                "handoff_seal": {"status": "sealed", "execution_id": execution_id},
+                "handoff_checks": [{"check_id": check,
+                                    "column_mapping": {"analysis_evidence_role": "supporting"}}],
+                "validation_code_blueprints": [{"check_id": check, "code": "print('check')"}],
+            }
+            handoff_path.write_text(json.dumps(handoff))
+            for lane_id, plan in (
+                ("followup-runner-860", {"action_type": "hypothesis_followup"}),
+                ("followup-runner-861", {"action_type": "methods_followup",
+                                         "planner_metadata": {"analyst_handoff": handoff,
+                                                              "analyst_handoff_path": str(handoff_path)}}),
+            ):
+                with self.subTest(lane=lane_id):
+                    plan_path = lanes / lane_id / "role-plan.json"
+                    plan_path.parent.mkdir()
+                    plan_path.write_text(json.dumps({"role": "lab-runner", **plan}))
+                    output = plan_path.parent / "outputs"
+                    args = ["python_stats.py", "--csv-root", str(root), "--output-dir", str(output),
+                            "--role-plan-file", str(plan_path)]
+                    with (
+                        patch.object(sys, "argv", args),
+                        patch.dict(os.environ, {"RESEARCHLAB_SERVED_HANDOFF_EXECUTION_ID": execution_id}),
+                        redirect_stdout(StringIO()),
+                        patch("python_stats_lib.entrypoint._run_blueprint", side_effect=RuntimeError("blueprint reached")) as blueprint,
+                    ):
+                        self.assertEqual(main(), 0)
+                    blueprint.assert_not_called()
+                    result = json.loads((output / "result.json").read_text())
+                    self.assertEqual(result["status"], "aborted")
+                    self.assertEqual(result["superseded_execution_id"], execution_id)
+                    self.assertNotIn("execution_receipts", result)
+                    self.assertFalse((output / "blueprints").exists())
+
+            # A different execution still reaches the blueprint launcher.
+            with patch("python_stats_lib.entrypoint._run_blueprint", side_effect=RuntimeError("blueprint reached")):
+                with self.assertRaisesRegex(RuntimeError, "blueprint reached"):
+                    run_driver(root, output, None, plan_path, served_execution_id="1" * 64)
+
     def test_a_policy_mean_or_one_passing_policy_cannot_confirm_an_all_policy_conjunction(self):
         with tempfile.TemporaryDirectory() as tmp:
             p=Path(tmp)/'primary_contrasts.csv'
@@ -128,6 +183,69 @@ class AnalysisContractTests(unittest.TestCase):
             gates.write_text('gate,observed,operator,threshold,passed\ncompetence,.2,>=,.8,False\n')
             run.metrics['resolution_status']=None
             self.assertIn('primary_contrast_estimates_missing',verify_outputs([run],c,b)['problems'])
+
+    def test_runner_840_value_column_preserves_contract_bound_design_invalid_result(self):
+        # MEASURED ON cycle-a-20260919, 2026-10-30: runner 840's
+        # validity_gates.csv recorded paired-cell completeness in `value` and
+        # the verifier falsely reported primary_contrast_estimates_missing.
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            axes=['initial_pose','object_geometry','friction']
+            policies=['compact_state_diffusion','chunked_bc','nearest_neighbor_action_chunk']
+            allocation_ids=[
+                f'{axis}_{policy}_remote_minus_local_auc'
+                for axis in axes for policy in policies]
+            policy_pairs=[
+                ('compact_state_diffusion','chunked_bc'),
+                ('compact_state_diffusion','nearest_neighbor_action_chunk'),
+                ('chunked_bc','nearest_neighbor_action_chunk')]
+            distance_ids=[
+                f'{axis}_{left}_minus_{right}_distance_matched_auc'
+                for axis in axes for left,right in policy_pairs]
+            interaction_ids=[
+                f'{axis}_{left}_vs_{right}_remote_minus_local_auc_interaction'
+                for axis in axes for left,right in policy_pairs]
+            ids=allocation_ids+distance_ids+interaction_ids
+            comparators={
+                contrast_id: ('local_gap_fill' if contrast_id in allocation_ids
+                              else next(right for left,right in policy_pairs
+                                        if f'{left}_minus_{right}_distance_matched_auc' in contrast_id
+                                        or f'{left}_vs_{right}_remote_minus_local_auc_interaction' in contrast_id))
+                for contrast_id in ids}
+            contrasts=root/'primary_contrasts.csv'
+            with contrasts.open('w',newline='') as f:
+                w=csv.writer(f);w.writerow([
+                    'analysis_contract_id','contrast_id','comparator','estimate',
+                    'simultaneous_lower','simultaneous_upper','status','failed_validity_gates'])
+                for contrast_id in ids:
+                    w.writerow(['analysis:bbc803',contrast_id,comparators[contrast_id],
+                                '','','','not_estimable_design_invalid','paired_cell_completeness'])
+            gates=root/'validity_gates.csv'
+            with gates.open('w',newline='') as f:
+                w=csv.writer(f);w.writerow([
+                    'gate','value','threshold','operator','passed','dataset_sha256'])
+                w.writerow(['paired_cell_completeness',0.0,.99,'>=',False,'886c1415'])
+                w.writerow(['minimum_in_support_success',1.0,.8,'>=',True,'886c1415'])
+            c={'contract_id':'analysis:bbc803','operational_spec':{
+                'required_contrast_ids':ids,'comparator':'local_gap_fill',
+                'contrast_comparators':comparators,'validity_gates':{
+                    'paired_cell_completeness_min':.99,
+                    'minimum_in_support_success_min':.8}}}
+            b={'contract_id':c['contract_id'],'evidence_role':'primary','status':'ready'}
+            run=SimpleNamespace(status='completed',tables=[
+                {'name':contrasts.name,'path':str(contrasts)},
+                {'name':gates.name,'path':str(gates)}],metrics={
+                    'analysis_contract_id':c['contract_id'],'pass_fail':'inconclusive',
+                    'resolution_status':'design_invalid'},script_path=None)
+            self.assertEqual(verify_outputs([run],c,b),{
+                **b,'status':'verified','problems':[],'executed_code_sha256':[]})
+            self.assertEqual(run.metrics['pass_fail'],'inconclusive')
+
+            gates.write_text(
+                'gate,value,threshold,operator,passed,dataset_sha256\n'
+                'paired_cell_completeness,0.0,0.98,>=,False,886c1415\n')
+            self.assertIn('primary_contrast_estimates_missing',
+                          verify_outputs([run],c,b)['problems'])
 
     def test_canonical_design_invalid_vocabulary_and_hypothesis_gates_are_verified(self):
         # MEASURED ON cycle-a-20260919, 2026-10-16: runner 356 used

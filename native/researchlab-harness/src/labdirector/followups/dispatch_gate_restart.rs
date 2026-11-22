@@ -1,6 +1,102 @@
 #![allow(unused_imports)]
 use super::*;
 
+const RESTART_ANSWERED_NOTICE: &str = "gate_restart_analyst_already_answered";
+
+/// The gate-restart analyst whose answer still stands: the newest one that
+/// completed, when no lane that could change its answer has ended since it was
+/// launched.
+///
+/// MEASURED ON cycle-a-20260919, 2026-11-22: the gate asked for a
+/// restart at every pass, each pass opened one analyst (the description carries
+/// an attempt number, so no two share a signature; it had reached 279), and each
+/// was assigned the lead's registered validation, whose held-out data had not
+/// been produced. Analysts 1641-1655 reported "blocked: the canonical CSV and its
+/// SHA-256 are absent" fifteen times in a row over two hours while nothing else
+/// in the cycle ran.
+///
+/// What can change the answer is work: an engineer, runner, scout, gatekeeper or
+/// other analyst lane ending. Another restart analyst cannot, and neither can a
+/// director -- a decision changes the answer through the lanes it orders.
+pub(crate) fn restart_analyst_that_answered_this_state(paths: &AppPaths, cycle_id: &str) -> Option<String> {
+    let modified = |path: PathBuf| fs::metadata(path).and_then(|meta| meta.modified()).ok();
+    let mut ended: Vec<(std::time::SystemTime, String, PathBuf)> = fs::read_dir(cycle_lanes_root(paths, cycle_id))
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let lane_dir = entry.path();
+            let at = modified(lane_dir.join("final-status.json"))?;
+            Some((at, entry.file_name().to_string_lossy().to_string(), lane_dir))
+        })
+        .collect();
+    ended.sort_by(|left, right| right.0.cmp(&left.0));
+    let plan_of = |lane_dir: &Path| read_role_plan_index_fields(&lane_dir.join("role-plan.json")).ok().flatten();
+    let is_restart_analyst = |lane_dir: &Path| {
+        plan_of(lane_dir).is_some_and(|plan| plan.role.as_deref() == Some("analyst") && plan.action_type.as_deref() == Some("gate_restart_followup"))
+    };
+    let is_director = |lane_dir: &Path| plan_of(lane_dir).is_some_and(|plan| plan.role.as_deref() == Some("lab-director"));
+    let mut answered: Option<(String, std::time::SystemTime)> = None;
+    for (ended_at, lane_id, lane_dir) in &ended {
+        if let Some((_, launched_at)) = &answered {
+            if ended_at <= launched_at {
+                break;
+            }
+        }
+        if is_restart_analyst(lane_dir) {
+            if answered.is_none() {
+                let completed = read_json(&lane_dir.join("final-status.json"))
+                    .ok()
+                    .is_some_and(|status| status.get("status").and_then(Value::as_str) == Some("completed"));
+                if !completed {
+                    return None; // one that failed has answered nothing
+                }
+                let launched_at = modified(lane_dir.join("invocation.json")).or_else(|| modified(lane_dir.join("prompt.txt")))?;
+                answered = Some((lane_id.clone(), launched_at));
+            }
+            continue;
+        }
+        if is_director(lane_dir) {
+            continue;
+        }
+        return None; // something that could change the answer ended after it began
+    }
+    answered.map(|(lane_id, _)| lane_id)
+}
+
+/// Tell the director, once per answer, that the restart it is waiting on was
+/// answered and that nothing has moved since.
+fn hand_restart_answer_to_director(paths: &AppPaths, cycle_id: &str, answered_by: &str) {
+    let notices = crate::core::support::harness_notices_path(paths, cycle_id);
+    let marker = format!("\"answered_by\":\"{answered_by}\"");
+    let told = fs::read_to_string(&notices)
+        .map(|text| text.lines().any(|line| line.contains(RESTART_ANSWERED_NOTICE) && line.contains(&marker)))
+        .unwrap_or(false);
+    if told {
+        return;
+    }
+    let lane_dir = crate::core::support::lane_root(paths, cycle_id, answered_by);
+    let message = format!(
+        "The gate still asks for the hypothesis set to be restarted, and no analyst was opened for it this time. Analyst {answered_by} already took that assignment, and no engineer, runner, scout, gatekeeper or other analyst lane has ended since it began: a new analyst would be given the same inputs and return the same answer. Read its answer at {} (its notes and files are in the same directory). If it says the validation cannot be prepared because something does not exist yet -- data, a held-out run, a registered specification -- then producing that is the next move and it is yours to order: a standing order to the role that can produce it, or a simulation order. If instead the lead should change, change it. Another analyst will be opened for the restart once some lane's work has ended.",
+        lane_dir.join("result.json").display()
+    );
+    let item = json!({
+        "type": "supervisor_instruction",
+        "payload": {"issue_code": "gate_restart_already_answered", "severity": "process_attention", "instance": answered_by, "message": message}
+    });
+    let lanes = dispatch_cycle_objective(paths, cycle_id)
+        .and_then(|objective| spawn_supervisor_labdirector_followup(paths, cycle_id, &objective, &item))
+        .unwrap_or_default();
+    let _ = crate::chronicle::reporting::append_event(
+        &notices,
+        RESTART_ANSWERED_NOTICE,
+        json!({
+            "answered_by": answered_by,
+            "director_lanes": lanes.iter().filter_map(|lane| lane.get("lane_id").cloned()).collect::<Vec<_>>(),
+            "detail": "the gate asked for a restart again; the newest restart analyst completed and nothing that could change its answer has ended since it was launched, so no analyst was opened and the director was told",
+        }),
+    );
+}
+
 pub(crate) fn dispatch_gate_restart_followups(
     paths: &AppPaths,
     cycle_id: &str,
@@ -231,7 +327,10 @@ pub(crate) fn dispatch_gate_restart_followups(
         .is_some_and(|text| !text.trim().is_empty());
     let something_to_rank = lead_has_statement || !action_candidate_payload.is_empty();
 
-    if created.len() < max_new_lanes
+    // The same assignment, on a cycle in which nothing has ended since the last
+    // analyst took it, gets the same answer: the director hears that answer once
+    // instead of another analyst being opened.
+    let analyst_due = created.len() < max_new_lanes
         && something_to_rank
         && followup_role_available(
             role_availability,
@@ -239,8 +338,13 @@ pub(crate) fn dispatch_gate_restart_followups(
             action_type,
             created_by_role,
             created_by_action,
-        )
-    {
+        );
+    let already_answered = if analyst_due { restart_analyst_that_answered_this_state(paths, cycle_id) } else { None };
+    if let Some(answered_by) = already_answered.as_deref() {
+        hand_restart_answer_to_director(paths, cycle_id, answered_by);
+    }
+
+    if analyst_due && already_answered.is_none() {
         let attempt = next_dispatch_action_attempt(
             "analyst",
             action_type,
@@ -395,4 +499,77 @@ pub(crate) fn dispatch_gate_restart_followups(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod restart_answer_tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    fn fixture() -> (tempfile::TempDir, AppPaths) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let paths = AppPaths {
+            project_root: temp.path().to_path_buf(),
+            runtime_root: temp.path().join(".research-lab"),
+            data_root: temp.path().join("data"),
+            stats_driver_script: PathBuf::new(),
+            literature_driver_script: PathBuf::new(),
+        };
+        (temp, paths)
+    }
+
+    fn at(minute: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000 + minute * 60)
+    }
+
+    fn touch(path: &Path, text: &str, when: SystemTime) {
+        fs::write(path, text).unwrap();
+        fs::File::options().write(true).open(path).unwrap().set_modified(when).unwrap();
+    }
+
+    /// A lane launched at `launched` and ended at `ended` (minutes).
+    fn lane(paths: &AppPaths, lane_id: &str, role: &str, action_type: &str, launched: u64, ended: u64, status: &str) {
+        let dir = cycle_lanes_root(paths, "c").join(lane_id);
+        fs::create_dir_all(&dir).unwrap();
+        touch(&dir.join("role-plan.json"), &format!("{{\n  \"action_type\": \"{action_type}\",\n  \"role\": \"{role}\",\n  \"source_brief_id\": \"gate-review\"\n}}\n"), at(launched));
+        touch(&dir.join("invocation.json"), "{}", at(launched));
+        touch(&dir.join("final-status.json"), &format!("{{\"status\": \"{status}\"}}"), at(ended));
+    }
+
+    // MEASURED: analysts 1641-1655, fifteen in a row, with nothing else ending.
+    #[test]
+    fn a_restart_analyst_is_not_reopened_while_nothing_has_ended_since_the_last_one_began() {
+        let (_temp, paths) = fixture();
+        lane(&paths, "followup-engineer-1307", "engineer", "simulation_generation_followup", 0, 10, "failed");
+        assert_eq!(restart_analyst_that_answered_this_state(&paths, "c"), None, "no restart analyst has run");
+        lane(&paths, "followup-analyst-1641", "analyst", "gate_restart_followup", 20, 27, "completed");
+        assert_eq!(restart_analyst_that_answered_this_state(&paths, "c").as_deref(), Some("followup-analyst-1641"));
+        // A director deciding changes the answer only through what it orders.
+        lane(&paths, "followup-lab-director-2093", "lab-director", "lab_director_requery_followup", 28, 40, "completed");
+        assert_eq!(restart_analyst_that_answered_this_state(&paths, "c").as_deref(), Some("followup-analyst-1641"));
+        // The engineer it ordered ends: the next restart analyst has something new.
+        lane(&paths, "followup-engineer-1310", "engineer", "capability_provisioning_followup", 41, 55, "completed");
+        assert_eq!(restart_analyst_that_answered_this_state(&paths, "c"), None);
+        lane(&paths, "followup-analyst-1642", "analyst", "gate_restart_followup", 56, 63, "completed");
+        assert_eq!(restart_analyst_that_answered_this_state(&paths, "c").as_deref(), Some("followup-analyst-1642"));
+    }
+
+    #[test]
+    fn work_that_ended_while_the_analyst_ran_or_an_analyst_that_failed_leaves_the_restart_open() {
+        let (_temp, paths) = fixture();
+        // A gatekeeper review ended after the analyst was launched: it did not see it.
+        lane(&paths, "followup-analyst-1641", "analyst", "gate_restart_followup", 20, 30, "completed");
+        lane(&paths, "followup-gatekeeper-2103", "gatekeeper", "independent_gate_review_followup", 15, 25, "completed");
+        assert_eq!(restart_analyst_that_answered_this_state(&paths, "c"), None);
+        // Another analyst's own work counts as work.
+        let (_temp, paths) = fixture();
+        lane(&paths, "followup-analyst-1641", "analyst", "gate_restart_followup", 20, 30, "completed");
+        lane(&paths, "followup-analyst-1640", "analyst", "methods_followup", 31, 38, "completed");
+        assert_eq!(restart_analyst_that_answered_this_state(&paths, "c"), None);
+        // The newest restart analyst failed: it answered nothing.
+        let (_temp, paths) = fixture();
+        lane(&paths, "followup-analyst-1641", "analyst", "gate_restart_followup", 20, 30, "completed");
+        lane(&paths, "followup-analyst-1642", "analyst", "gate_restart_followup", 31, 38, "failed");
+        assert_eq!(restart_analyst_that_answered_this_state(&paths, "c"), None);
+    }
 }

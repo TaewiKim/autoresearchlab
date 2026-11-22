@@ -786,11 +786,18 @@ pub(crate) fn normalized_path_key(path: &str) -> String {
 }
 
 pub(crate) fn lab_runner_result_analyst_handoff_path(result: &Value) -> Option<&str> {
+    // MEASURED ON cycle-a-20260919, 2026-11-22: runners 859 and 860
+    // picked analyst 1655's supporting handoff in the driver. Their plans never
+    // named it, so dispatch missed both completed runs and queued runner 861.
     result
-        .get("role_plan")
-        .and_then(|value| value.get("planner_metadata"))
-        .and_then(|value| value.get("analyst_handoff_path"))
+        .get("executed_handoff_path")
         .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .or_else(|| {
+            result
+                .pointer("/role_plan/planner_metadata/analyst_handoff_path")
+                .and_then(Value::as_str)
+        })
         .or_else(|| {
             result
                 .get("planner_metadata")

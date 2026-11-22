@@ -998,6 +998,76 @@ mod new_lead_evidence_tests {
     }
 
     #[test]
+    fn blocker_adjudication_advances_without_another_primary_measurement() {
+        // MEASURED ON cycle-a-20260919, 2026-10-31: at lead_selected
+        // with needs_materialization, gatekeeper 2008 waited on round-1049 for
+        // a runner the Director did not authorize. Its actual assignment was
+        // to adjudicate a blocker challenge using existing evidence.
+        let temp = tempfile::TempDir::new().unwrap();
+        let paths = cycle_paths(temp.path());
+        let cycle = "cycle-test";
+        let lane = "followup-gatekeeper-2008";
+        let statement = "the selected allocation lead";
+        fs::create_dir_all(paths.runtime_root.join("lanes").join(cycle)).unwrap();
+        recorded_round(&paths, statement);
+        let lead = json!({
+            "status": "selected", "statement": statement,
+            "dataset_or_accession": "balanced_local_gap_five_arm_frozen_1391",
+            "validation_data_status": "needs_materialization"
+        });
+        let lead_path = state_root(&paths).join(format!("{cycle}-lab-director-hypothesis.json"));
+        write_json(&lead_path, &lead).unwrap();
+        let gate = json!({"gate_passed": false, "score": 35,
+            "gatekeeper_review_status": "parsed", "gatekeeper_pending_rubrics": []});
+        let gate_path = state_root(&paths).join(format!("{cycle}-gate-review.json"));
+        write_json(&gate_path, &gate).unwrap();
+        let contract: LaneContract = serde_json::from_value(json!({
+            "cycle_id": cycle, "lane_id": lane, "role": "gatekeeper",
+            "runtime_class": "codex-agent", "mode": "read-write-scoped",
+            "cwd": temp.path(), "task_file": temp.path().join("task.md"),
+            "output_artifact": temp.path().join("result.json"), "fallback_strategy": null
+        })).unwrap();
+        let snapshot = DependencySnapshot {
+            counts: HashMap::from([("lab-runner".to_string(), 1)]),
+            completed_scouts: 1, completed_data_scouts: 1,
+            // The recorded accession is unusable; no successor is selected yet.
+            has_lab_director_hypothesis: false,
+            conclusion_needs_hypothesis_strategy: false, hypothesis_gate_passed: false,
+            latest_analyst_handoff_signal: None, pending_runner_post_run_review: None,
+        };
+        let plan_path = lane_role_plan_path(&paths, cycle, lane);
+        let mut plan = json!({"action_type": "independent_gate_review_followup",
+            "planner_metadata": {
+                "target_rubric": "novelty", "validation_results": {"validation_results": []},
+                "current_lead_under_review": {"statement": statement},
+                "review_mode": "lab_director_blocker_adjudication",
+                "lab_director_blocker_review_requests": [{
+                    "request_id": "allocation_positioning_chart_review_v1",
+                    "target_rubric": "novelty", "requested_action": "supersede",
+                    "blocker": "Positioning understates the relevant prior art",
+                    "rationale": "The completed procedure comparison now acknowledges it",
+                    "evidence_refs": ["followup-lab-director-1763/procedure_comparison.json"]
+                }]
+            }});
+        write_json(&plan_path, &plan).unwrap();
+        let blocker = || dependency_blocker_for_lane_with_snapshot(
+            &paths, cycle, &contract, &snapshot).unwrap();
+        assert_eq!(blocker(), None, "the existing adjudicator must reach execution");
+        assert_eq!(read_json(&gate_path).unwrap(), gate, "launching cannot change scores");
+        assert_eq!(read_json(&lead_path).unwrap(), lead, "launching cannot promote a lead");
+
+        // A mode label alone and an ordinary repeat review still need new evidence.
+        let requests = plan["planner_metadata"]["lab_director_blocker_review_requests"].clone();
+        plan["planner_metadata"]["lab_director_blocker_review_requests"] = json!([]);
+        write_json(&plan_path, &plan).unwrap();
+        assert!(blocker().unwrap().starts_with("waiting-for-new-lead-evidence"));
+        plan["planner_metadata"]["lab_director_blocker_review_requests"] = requests;
+        plan["planner_metadata"]["review_mode"] = Value::Null;
+        write_json(&plan_path, &plan).unwrap();
+        assert!(blocker().unwrap().starts_with("waiting-for-new-lead-evidence"));
+    }
+
+    #[test]
     fn evidence_finished_after_the_round_releases_the_review() {
         let temp = tempfile::TempDir::new().unwrap();
         let paths = cycle_paths(temp.path());
@@ -1384,8 +1454,34 @@ fn raw_dependency_blocker_for_lane_with_snapshot(
                         .and_then(|role_plan| role_plan.get("target_rubric"))
                 })
                 .and_then(Value::as_str);
-            if let Some(reason) = gate_review_has_nothing_new(paths, cycle_id, target_rubric) {
-                return Ok(Some(reason));
+            // MEASURED ON cycle-a-20260919, 2026-10-31: three
+            // blocker adjudicators waited for new runner evidence even though
+            // the Director challenged existing evidence/scope and authorized
+            // no new run. The challenge itself is new review work; only the
+            // independent reviewer can decide whether the blocker still holds.
+            let adjudicates_blocker = role_plan.as_ref().is_some_and(|plan| {
+                let metadata = plan.get("planner_metadata").unwrap_or(&Value::Null);
+                let action = metadata.get("review_action").unwrap_or(&Value::Null);
+                [plan, metadata, action].iter().any(|context| {
+                    context.get("review_mode").and_then(Value::as_str)
+                        == Some("lab_director_blocker_adjudication")
+                        && context.get("lab_director_blocker_review_requests")
+                            .and_then(Value::as_array)
+                            .is_some_and(|requests| requests.iter().any(|request| {
+                                ["blocker", "rationale"].iter().all(|field| {
+                                    request.get(*field).and_then(Value::as_str)
+                                        .is_some_and(|text| !text.trim().is_empty())
+                                }) && request.get("evidence_refs").and_then(Value::as_array)
+                                    .is_some_and(|refs| refs.iter().any(|reference| {
+                                        reference.as_str().is_some_and(|text| !text.trim().is_empty())
+                                    }))
+                            }))
+                })
+            });
+            if !adjudicates_blocker {
+                if let Some(reason) = gate_review_has_nothing_new(paths, cycle_id, target_rubric) {
+                    return Ok(Some(reason));
+                }
             }
         }
     }
