@@ -194,6 +194,21 @@ function measurementInstruction(measurements) {
   return measuredBy;
 }
 
+// The LabDirector's standing order this lane was opened for, when it has one.
+//
+// MEASURED ON cycle-a-20260919, 2026-11-23: after runner 862 measured
+// the contract (2026-11-22T17:10Z), directors 2104-2137 addressed 20 standing
+// orders to an analyst. Every lane opened for one -- 42 of them, three per
+// order until its attempts ran out -- was rebound here to "interpret runner
+// 862", an interpretation 89 gate-restart analysts were also writing. None
+// carried out what its director asked: 13 orders ended cancelled, 5 superseded.
+// The order survives in review_action; it is the assignment.
+function directorOrder(plan) {
+  const order = plan.planner_metadata?.review_action;
+  const asked = typeof order?.description === "string" ? order.description.trim() : "";
+  return order?.work_order_id && asked ? { id: order.work_order_id, asked } : null;
+}
+
 function bindAnalystPlan(plan, contract, recovery = null, measurements = []) {
   plan.planner_metadata ||= {};
   const staleContextCleared = clearStaleAnalysisContext(plan, contract.contract_id);
@@ -231,7 +246,12 @@ function bindAnalystPlan(plan, contract, recovery = null, measurements = []) {
     : ANALYST_CONTRACT_INSTRUCTION;
   if (measurements.length) plan.planner_metadata.analysis_contract_measurements = measurements;
   else delete plan.planner_metadata.analysis_contract_measurements;
-  if (contractMeasured) {
+  const ordered = contractMeasured ? directorOrder(plan) : null;
+  if (ordered) {
+    // The measurement is an input to the order, not a replacement for it: the
+    // lane keeps the action type and brief its order is recognised by.
+    plan.followup_description = `${ordered.asked} This is LabDirector's standing order ${ordered.id}, addressed to this lane: carry out what it asks, within the conditions and limits it states, and report the result for LabDirector.`;
+  } else if (contractMeasured) {
     // MEASURED ON cycle-a-20260919, 2026-10-29: analyst 1335 was
     // told the contract was already measured, but its assignment still began
     // "Prepare the executable validation" and its schema required a handoff,

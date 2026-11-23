@@ -213,7 +213,7 @@ function selectedSimulationOutput(ctx) {
 
   let count = 0;
   let newestMs = 0;
-  let newestPath = null;
+  let newest = {};
   for (const order of orders) {
     const raw = typeof order?.output_path === "string" ? order.output_path.trim().replace(/\\/g, "/") : "";
     const prefix = `.research-lab/datasets/${ctx.cycleId}/`;
@@ -253,10 +253,10 @@ function selectedSimulationOutput(ctx) {
     const bundleMs = Math.max(mtimeMs(csvPath), mtimeMs(manifestPath));
     if (bundleMs >= newestMs) {
       newestMs = bundleMs;
-      newestPath = csvPath;
+      newest = { dataset_path: csvPath, order, manifest };
     }
   }
-  return { count, ms: newestMs, selected_simulation: true, dataset_path: newestPath };
+  return { count, ms: newestMs, selected_simulation: true, dataset_path: null, ...newest };
 }
 
 function selectedMaterializedSimulation(ctx) {
@@ -471,36 +471,107 @@ function sourceLaneFinishedMs(ctx, laneId) {
   return finalStatus ? laneFinishedMs(laneDir, finalStatus) : 0;
 }
 
+// MEASURED ON cycle-a-20260919, 2026-11-22: Engineer 1336's pilot
+// covered the entire calibration order and Engineer 1337 independently checked
+// its measurements. Three newer interpretations of Runner 862 still left the
+// projections citing a pre-bundle run. The audit completes analysis of the
+// calibration. Claim review still needs fresh validation results and packets.
+function auditedOrderPilotMs(ctx, data) {
+  const { order, manifest, dataset_path: csvPath } = data;
+  const pilot = manifest?.pilot;
+  if (!order || order.pilot_only === true || manifest?.status !== "complete"
+    || manifest.complete_sweep !== true || manifest.full_sweep_executed !== false
+    || manifest.analysis_eligible !== true || pilot?.passed !== true) return 0;
+  if (!nonEmpty(order.seeds) || JSON.stringify(order.pilot?.seeds) !== JSON.stringify(order.seeds)
+    || JSON.stringify(pilot.seeds) !== JSON.stringify(order.seeds)
+    || !(order.episodes_per_condition > 0) || order.pilot.episodes_per_condition !== order.episodes_per_condition
+    || pilot.episodes_per_condition !== order.episodes_per_condition) return 0;
+  const criteria = order.pilot.criteria;
+  const measured = pilot.criteria_results;
+  if (!nonEmpty(criteria) || !nonEmpty(measured) || measured.length !== criteria.length
+    || measured.some((result) => result?.passed !== true || !Number.isFinite(result.observed))
+    || !criteria.every((criterion) => criterion?.name && Number.isFinite(criterion.threshold)
+      && measured.some((result) => result.name === criterion.name && result.threshold === criterion.threshold))) return 0;
+
+  const producerId = manifest.lane_id;
+  if (typeof producerId !== "string" || !/^[\w-]+$/.test(producerId)) return 0;
+  const producerDir = path.join(ctx.lanesDir, producerId);
+  const final = readJsonOrNull(path.join(producerDir, "final-status.json"));
+  if (final?.status !== "completed" || final.failure_category === "owner_stopped"
+    || laneActionType(producerDir, producerId) !== "simulation_data_generation_followup") return 0;
+  const producerMs = parseMs(final.completed_at || final.finished_at);
+  if (producerMs < data.ms) return 0;
+  const producerResult = readJsonOrNull(path.join(producerDir, "result.json"));
+  const outputs = producerResult?.extracted_json?.simulation_outputs;
+  const manifestPath = path.join(path.dirname(csvPath), "manifest.json");
+  if (producerResult?.status !== "completed" || !Array.isArray(outputs) || !outputs.some((output) => (
+    output?.request_id === order.request_id && output.return_code === 0
+    && output.rows > 0 && output.rows === (manifest.rows ?? manifest.row_count)
+    && typeof output.csv_path === "string" && path.resolve(ctx.cwd, output.csv_path) === path.resolve(csvPath)
+    && typeof output.manifest_path === "string" && path.resolve(ctx.cwd, output.manifest_path) === path.resolve(manifestPath)
+  ))) return 0;
+
+  let auditMs = 0;
+  let audit;
+  try {
+    for (const laneId of fs.readdirSync(ctx.lanesDir)) {
+      const laneDir = path.join(ctx.lanesDir, laneId);
+      const final = readJsonOrNull(path.join(laneDir, "final-status.json"));
+      if (final?.status !== "completed" || final.failure_category === "owner_stopped") continue;
+      const finishedMs = parseMs(final.completed_at || final.finished_at);
+      if (finishedMs <= producerMs || finishedMs < auditMs) continue;
+      const plan = readJsonOrNull(path.join(laneDir, "role-plan.json"));
+      if (plan?.action_type !== "runner_execution_audit_followup"
+        || plan.planner_metadata?.audit_target?.lane_id !== producerId) continue;
+      const result = readJsonOrNull(path.join(laneDir, "result.json"));
+      const report = result?.extracted_json?.execution_audit;
+      if (result?.status !== "completed" || report?.target_lane_id !== producerId) continue;
+      if (finishedMs === auditMs && audit?.verdict !== "pass") continue;
+      audit = report;
+      auditMs = finishedMs;
+    }
+    const required = ["identity", "no_silent_fallback", "plausibility", "completeness", "positive_control"];
+    if (audit?.verdict !== "pass" || !Array.isArray(audit.checks)
+      || audit.checks.some((check) => check?.verdict !== "pass")
+      || !required.every((name) => audit.checks.some((check) => check.check === name))) return 0;
+    return createHash("sha256").update(fs.readFileSync(csvPath)).digest("hex") === pilot.csv_sha256_at_gate ? auditMs : 0;
+  } catch {
+    return 0;
+  }
+}
+
 function analysisEvidence(ctx) {
   if (ctx.analysisEvidence) return ctx.analysisEvidence;
   const validationResults = ctx.read("validation-results").value?.validation_results;
   const evidencePackets = ctx.read("evidence-packets").value?.evidence_packets;
   const present = nonEmpty(validationResults) && nonEmpty(evidencePackets);
   const data = experimentData(ctx);
-  if (!present || !data.selected_simulation) {
+  if (!data.selected_simulation) {
     ctx.analysisEvidence = { reached: present, ms: 0, strict_epoch: false };
     return ctx.analysisEvidence;
   }
 
-  const validationMs = Math.max(0, ...validationResults.map((result) => (
+  const validationMs = present ? Math.max(0, ...validationResults.map((result) => (
     sourceLaneFinishedMs(ctx, result?.provenance?.lane_id)
-  )));
-  const packetMs = Math.max(0, ...evidencePackets.flatMap((packet) => (
+  ))) : 0;
+  const packetMs = present ? Math.max(0, ...evidencePackets.flatMap((packet) => (
     Array.isArray(packet?.provenance)
       ? packet.provenance.map((laneId) => sourceLaneFinishedMs(ctx, laneId))
       : []
-  )));
+  ))) : 0;
   // MEASURED ON cycle-a-20260919, 2026-09-21: after the selected
   // 4,500-row simulation bundle completed, validation/evidence projections
   // were republished with fresh mtimes but still named only pre-bundle failed
   // runner lanes. Existence (or projection mtime) cannot make that old analysis
   // answer a replacement data epoch; both projections must cite a lane that
   // finished after the bundle did.
-  const reached = validationMs >= data.ms && packetMs >= data.ms;
+  const reached = present && validationMs >= data.ms && packetMs >= data.ms;
+  const auditMs = reached ? 0 : auditedOrderPilotMs(ctx, data);
   ctx.analysisEvidence = {
-    reached,
-    ms: reached ? Math.max(validationMs, packetMs) : 0,
-    strict_epoch: true,
+    reached: reached || auditMs > 0,
+    ms: reached ? Math.max(validationMs, packetMs) : auditMs,
+    strict_epoch: present || auditMs > 0,
+    order_audit_only: auditMs > 0,
   };
   return ctx.analysisEvidence;
 }
@@ -760,6 +831,9 @@ const MILESTONES = [
     reached: (ctx) => gateRoundForCurrentEvidence(ctx).ms > 0,
     at: (ctx) => gateRoundForCurrentEvidence(ctx).ms,
     waiting: (ctx) => {
+      if (analysisEvidence(ctx).order_audit_only) {
+        return ["claim_validation_not_published: gate review still needs current validation results and evidence packets"];
+      }
       const blockers = ctx.read("gate-review").value?.gate_scientific_blockers;
       return Array.isArray(blockers) ? blockers.slice(0, 4).map((item) => `gate_blocker: ${String(item?.blocker || item).slice(0, 200)}`) : [];
     },
@@ -928,6 +1002,7 @@ function gateRoundAfterLead(ctx) {
 function gateRoundForCurrentEvidence(ctx) {
   const analysis = analysisEvidence(ctx);
   if (!analysis.strict_epoch) return gateRoundAfterLead(ctx);
+  if (analysis.order_audit_only) return { ms: 0, rounds: 0 };
   const afterMs = analysis.ms;
   if (!afterMs) return { ms: 0, rounds: 0 };
   const rows = ctx.readJsonl("gate-review-history").rows;

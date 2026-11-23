@@ -281,6 +281,40 @@ test("a measured contract routes the analyst to interpretation instead of anothe
   assert.doesNotMatch(plan.followup_description,/Prepare the executable validation|writing the final handoff/);
 });
 
+test("a director's standing order to an analyst is carried out as written on a measured contract",()=>{
+  // MEASURED ON cycle-a-20260919, 2026-11-23: 42 analysts opened for
+  // 20 director orders after runner 862 were each told to interpret runner 862.
+  const f=fixture(), contract=currentAnalysisContract(f.root,"c");
+  const measurements=[{lane_id:"followup-runner-862",result_path:"/lanes/followup-runner-862/result.json",primary_contrasts:[{
+    contrast_id:"success_gap:diffusion_policy_minus_act",estimate:"",simultaneous_lower:"",simultaneous_upper:"",status:"not_estimable_design_invalid",
+  }]}];
+  const asked="Qualify at least two seed-disjoint blocks with fresh realized shared banks and 14 paired unseen keys per block.";
+  const plan={action_type:"labdirector_comparator_validation_followup",source_brief_id:"labdirector-next-action-followup-lab-director-2137",
+    followup_description:asked,planner_metadata:{review_action:{work_order_id:"wo-a236b19801",description:asked,
+      brief_id:"labdirector-next-action-followup-lab-director-2137",type:"methods_followup"}}};
+
+  assert.equal(bindAnalystPlan(plan,contract,null,measurements),true);
+  assert.equal(plan.action_type,"labdirector_comparator_validation_followup");
+  assert.equal(plan.source_brief_id,"labdirector-next-action-followup-lab-director-2137");
+  assert.ok(plan.followup_description.startsWith(asked));
+  assert.match(plan.followup_description,/standing order wo-a236b19801/);
+  assert.match(plan.followup_description,/already available: verified execution followup-runner-862/);
+  assert.match(plan.followup_description,/runs no further primary execution of this measurement specification/);
+  assert.doesNotMatch(plan.followup_description,/Interpret the completed primary measurement|Prepare the executable validation/);
+  assert.equal(plan.planner_metadata.analysis_request,undefined);
+  assert.equal(bindAnalystPlan(plan,contract,null,measurements),false);
+
+  // A lane nobody ordered -- a gate restart -- still interprets the measurement.
+  const restart={action_type:"gate_restart_followup",source_brief_id:"gate-review",planner_metadata:{novelty_mode:"gate-restart-rerank"}};
+  assert.equal(bindAnalystPlan(restart,contract,null,measurements),true);
+  assert.equal(restart.action_type,"runner_result_interpretation_followup");
+  assert.equal(restart.planner_metadata.novelty_mode,"gate-restart-rerank");
+  // Before the contract is measured an ordered lane prepares its validation as before.
+  const early={action_type:"methods_followup",planner_metadata:{review_action:{work_order_id:"wo-1",description:asked}}};
+  assert.equal(bindAnalystPlan(early,contract,null,[]),true);
+  assert.match(early.followup_description,/^Prepare the executable validation/);
+});
+
 test("a result-informed lead rewrite retains measurements of the same registered specification",()=>{
   // MEASURED ON cycle-a-20260919, 2026-10-18: runners 486/487
   // measured the registered seven contrasts; the lead then restated those

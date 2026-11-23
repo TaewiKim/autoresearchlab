@@ -1327,6 +1327,124 @@ test("replacement simulation data invalidates republished pre-bundle analysis an
   assert.equal(concluded.next_milestone, null);
 });
 
+test("an audited full-order pilot reaches analysis while claim review still waits for validation", (t) => {
+  // MEASURED ON cycle-a-20260919, 2026-11-22: Engineer 1336 measured
+  // the entire 56-row calibration order and Engineer 1337 audited its criteria.
+  // Three interpretations of Runner 862 finished after the bundle, but the
+  // validation and packet projections still cited only the older run.
+  const cwd = buildCycle("analysis");
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  const leadPath = path.join(stateDir(cwd), `${CYCLE}-lab-director-hypothesis.json`);
+  writeJson(leadPath, {
+    ...JSON.parse(fs.readFileSync(leadPath, "utf8")),
+    validation_data_status: "needs_materialization",
+  });
+  const requestId = "compact_state_v2_phase_matched_replication";
+  const outputPath = `.research-lab/datasets/${CYCLE}/simulations/${requestId}/episodes.csv`;
+  const seeds = [2114002];
+  const criteria = [{ name: "retrieval_placement_activation", threshold: 0.15, comparator: ">=" }];
+  const orderPilot = { seeds, episodes_per_condition: 14, criteria };
+  writeState(cwd, "simulation-orders", {
+    updated_at: "2026-11-22T19:32:00Z",
+    simulation_orders: [{
+      request_id: requestId, output_path: outputPath, seeds, episodes_per_condition: 14,
+      emitted_columns: [{ name: "success" }], pilot: orderPilot, pilot_only: false,
+    }],
+  });
+  const csvPath = path.join(cwd, outputPath);
+  const manifestPath = path.join(path.dirname(csvPath), "manifest.json");
+  const csv = `success\n${"1\n".repeat(40)}${"0\n".repeat(16)}`;
+  const csvHash = createHash("sha256").update(csv).digest("hex");
+  const producerId = "followup-engineer-1336";
+  const manifest = {
+    request_id: requestId, lane_id: producerId, row_count: 56, status: "complete",
+    analysis_eligible: true, complete_sweep: true, full_sweep_executed: false,
+    pilot: {
+      seeds, episodes_per_condition: 14, passed: true, csv_sha256_at_gate: csvHash,
+      criteria_results: criteria.map(({ name, threshold }) => ({ name, threshold, observed: 1, passed: true })),
+    },
+    in_support_validation: { passed: true, arms: [{ in_support_success_rate: 1 }] },
+  };
+  const bundleTime = new Date("2026-11-22T19:36:57.415Z");
+  writeJson(manifestPath, manifest);
+  fs.writeFileSync(csvPath, csv);
+  for (const file of [csvPath, manifestPath]) fs.utimesSync(file, bundleTime, bundleTime);
+
+  const finish = (laneId, actionType, ts) => addFinishedLane(cwd, {
+    laneId, actionType, finishedMs: Date.parse(ts),
+  });
+  const oldRunner = "followup-runner-862";
+  finish(oldRunner, "methods_followup", "2026-11-22T17:10:48Z");
+  const cite = (laneId) => {
+    writeState(cwd, "validation-results", { validation_results: [{ provenance: { lane_id: laneId } }] });
+    writeState(cwd, "evidence-packets", { evidence_packets: [{ provenance: [laneId] }] });
+  };
+  cite(oldRunner);
+
+  const producer = finish(producerId, "simulation_data_generation_followup", "2026-11-22T19:37:35Z");
+  writeJson(path.join(producer, "result.json"), {
+    status: "completed",
+    extracted_json: { simulation_outputs: [{ request_id: requestId, csv_path: csvPath, manifest_path: manifestPath, rows: 56, return_code: 0 }] },
+  });
+  for (const [laneId, ts] of [
+    ["followup-analyst-1703", "2026-11-22T19:39:03Z"],
+    ["followup-analyst-1700", "2026-11-22T19:40:17Z"],
+    ["followup-analyst-1695", "2026-11-22T19:42:58Z"],
+  ]) {
+    const lane = finish(laneId, "runner_result_interpretation_followup", ts);
+    writeJson(path.join(lane, "result.json"), {
+      status: "completed", extracted_json: { lab_director_validation_report: { runner_lane_id: oldRunner } },
+    });
+  }
+  const auditDir = finish("followup-engineer-1337", "runner_execution_audit_followup", "2026-11-22T19:41:41Z");
+  writeJson(path.join(auditDir, "role-plan.json"), {
+    role: "engineer", action_type: "runner_execution_audit_followup",
+    planner_metadata: { audit_target: { lane_id: producerId } },
+  });
+  const auditChecks = ["identity", "no_silent_fallback", "plausibility", "completeness", "positive_control"]
+    .map((check) => ({ check, verdict: "pass" }));
+  const audit = { target_lane_id: producerId, verdict: "pass", checks: auditChecks };
+  const publishAudit = (report) => writeJson(path.join(auditDir, "result.json"), {
+    status: "completed", extracted_json: { execution_audit: report },
+  });
+  const now = Date.parse("2026-11-22T19:45:29.848Z");
+  const progress = () => recordProgress({ cwd, cycleId: CYCLE, now }).progress;
+  const churn = (observed) => stallFindings({ progress: observed, config: supervisorConfig({}), now })
+    .find(({ signature }) => signature === "lane_churn:experiment_data:runner_result_interpretation_followup");
+
+  publishAudit({ ...audit, target_lane_id: oldRunner });
+  const blocked = progress();
+  assert.equal(blocked.current_milestone, "experiment_data");
+  assert.deepEqual(churn(blocked).lane_ids.slice().sort(), ["followup-analyst-1695", "followup-analyst-1700", "followup-analyst-1703"]);
+
+  // A gate round after the audit still has no fresh claim evidence to review.
+  appendJsonl(cwd, "gate-review-history", [{ ts: "2026-11-22T19:44:00Z", gate_passed: false }]);
+  publishAudit(audit);
+  const analysed = progress();
+  assert.equal(analysed.current_milestone, "analysis");
+  assert.equal(analysed.reached_at, "2026-11-22T19:41:41.000Z");
+  assert.equal(analysed.next_milestone, "gate_review");
+  assert.match(analysed.waiting_on[0], /^claim_validation_not_published:/);
+  assert.equal(analysed.advanced, true);
+  assert.equal(churn(analysed), undefined);
+
+  publishAudit({ ...audit, verdict: "fail" });
+  assert.equal(progress().current_milestone, "experiment_data");
+  publishAudit({ ...audit, checks: auditChecks.filter(({ check }) => check !== "positive_control") });
+  assert.equal(progress().current_milestone, "experiment_data");
+  publishAudit(audit);
+  fs.writeFileSync(csvPath, csv.replace("1", "0"));
+  fs.utimesSync(csvPath, bundleTime, bundleTime);
+  assert.equal(progress().current_milestone, "experiment_data");
+  fs.writeFileSync(csvPath, csv);
+  fs.utimesSync(csvPath, bundleTime, bundleTime);
+
+  const newRunner = "followup-runner-863";
+  finish(newRunner, "methods_followup", "2026-11-22T19:43:30Z");
+  cite(newRunner);
+  assert.equal(progress().current_milestone, "gate_review");
+});
+
 test("fresh evidence for a selected materialized bundle reopens a stale conclusion", () => {
   // MEASURED ON cycle-a-20260919, 2026-10-04: progress stayed at
   // terminal conclusion through three completed methods followups even though

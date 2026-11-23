@@ -3,9 +3,39 @@ use super::*;
 
 const RESTART_ANSWERED_NOTICE: &str = "gate_restart_analyst_already_answered";
 
-/// The gate-restart analyst whose answer still stands: the newest one that
-/// completed, when no lane that could change its answer has ended since it was
-/// launched.
+/// What a gate-restart analyst was assigned, read from its role plan after it ran.
+enum RestartAssignment {
+    /// Rank replacement leads from the critique and the cycle's work so far.
+    Ranking,
+    /// Interpret the lead's verified primary measurement: the binding gives every
+    /// analyst nobody ordered this assignment once the lead's contract is measured.
+    MeasuredContract { statement: String },
+}
+
+/// The binding renames a restart analyst (`runner_result_interpretation_followup`,
+/// brief = the measuring runner); `novelty_mode` is what the dispatcher wrote and
+/// the binding leaves alone.
+fn restart_assignment(lane_dir: &Path) -> Option<RestartAssignment> {
+    let role_plan_path = lane_dir.join("role-plan.json");
+    let fields = read_role_plan_index_fields(&role_plan_path).ok().flatten()?;
+    if fields.role.as_deref() != Some("analyst") {
+        return None;
+    }
+    match fields.action_type.as_deref() {
+        Some("gate_restart_followup") => Some(RestartAssignment::Ranking),
+        Some("runner_result_interpretation_followup") => {
+            let plan = crate::labdirector::followup_counts::read_role_plan_if_compact(&role_plan_path).ok().flatten()?;
+            let field = |pointer: &str| plan.pointer(pointer).and_then(Value::as_str).unwrap_or("").to_string();
+            (field("/planner_metadata/novelty_mode") == "gate-restart-rerank")
+                .then(|| RestartAssignment::MeasuredContract { statement: field("/planner_metadata/analysis_contract/statement") })
+        }
+        _ => None,
+    }
+}
+
+/// The gate-restart analyst whose answer still stands, and whether its
+/// assignment was the measured contract: the newest one that completed, when
+/// nothing that could change its answer has happened since it was launched.
 ///
 /// MEASURED ON cycle-a-20260919, 2026-11-22: the gate asked for a
 /// restart at every pass, each pass opened one analyst (the description carries
@@ -15,10 +45,20 @@ const RESTART_ANSWERED_NOTICE: &str = "gate_restart_analyst_already_answered";
 /// SHA-256 are absent" fifteen times in a row over two hours while nothing else
 /// in the cycle ran.
 ///
-/// What can change the answer is work: an engineer, runner, scout, gatekeeper or
+/// What can change a ranking is work: an engineer, runner, scout, gatekeeper or
 /// other analyst lane ending. Another restart analyst cannot, and neither can a
 /// director -- a decision changes the answer through the lanes it orders.
-pub(crate) fn restart_analyst_that_answered_this_state(paths: &AppPaths, cycle_id: &str) -> Option<String> {
+///
+/// MEASURED ON the same cycle, 2026-11-23: runner 862 measured the lead's
+/// contract at 2026-11-22T17:10Z, and from then on each restart analyst was
+/// renamed at launch into an interpretation of runner 862. This guard knew a
+/// restart analyst by its action type, so it took each renamed one for another
+/// analyst's work and opened the next: 89 in thirteen hours (attempt 293), every
+/// one handed the same measurement and returning the same report, while 29
+/// engineer pilots ended and changed nothing in that assignment. What changes an
+/// interpretation is what it interprets: a lab-runner ending, the lead being
+/// restated, or its registered specification being rewritten.
+fn restart_answer(paths: &AppPaths, cycle_id: &str) -> Option<(String, bool)> {
     let modified = |path: PathBuf| fs::metadata(path).and_then(|meta| meta.modified()).ok();
     let mut ended: Vec<(std::time::SystemTime, String, PathBuf)> = fs::read_dir(cycle_lanes_root(paths, cycle_id))
         .ok()?
@@ -30,19 +70,16 @@ pub(crate) fn restart_analyst_that_answered_this_state(paths: &AppPaths, cycle_i
         })
         .collect();
     ended.sort_by(|left, right| right.0.cmp(&left.0));
-    let plan_of = |lane_dir: &Path| read_role_plan_index_fields(&lane_dir.join("role-plan.json")).ok().flatten();
-    let is_restart_analyst = |lane_dir: &Path| {
-        plan_of(lane_dir).is_some_and(|plan| plan.role.as_deref() == Some("analyst") && plan.action_type.as_deref() == Some("gate_restart_followup"))
+    let role_of = |lane_dir: &Path| {
+        read_role_plan_index_fields(&lane_dir.join("role-plan.json")).ok().flatten().and_then(|plan| plan.role).unwrap_or_default()
     };
-    let is_director = |lane_dir: &Path| plan_of(lane_dir).is_some_and(|plan| plan.role.as_deref() == Some("lab-director"));
-    let mut answered: Option<(String, std::time::SystemTime)> = None;
+    let mut answered: Option<(String, RestartAssignment, std::time::SystemTime)> = None;
+    let mut work_ended = false;
     for (ended_at, lane_id, lane_dir) in &ended {
-        if let Some((_, launched_at)) = &answered {
-            if ended_at <= launched_at {
-                break;
-            }
+        if answered.as_ref().is_some_and(|(_, _, launched_at)| ended_at <= launched_at) {
+            break;
         }
-        if is_restart_analyst(lane_dir) {
+        if let Some(assignment) = restart_assignment(lane_dir) {
             if answered.is_none() {
                 let completed = read_json(&lane_dir.join("final-status.json"))
                     .ok()
@@ -51,21 +88,36 @@ pub(crate) fn restart_analyst_that_answered_this_state(paths: &AppPaths, cycle_i
                     return None; // one that failed has answered nothing
                 }
                 let launched_at = modified(lane_dir.join("invocation.json")).or_else(|| modified(lane_dir.join("prompt.txt")))?;
-                answered = Some((lane_id.clone(), launched_at));
+                answered = Some((lane_id.clone(), assignment, launched_at));
             }
             continue;
         }
-        if is_director(lane_dir) {
-            continue;
+        match role_of(lane_dir).as_str() {
+            "lab-director" => {}
+            "lab-runner" => return None, // a measurement ended after it began
+            _ => work_ended = true,
         }
-        return None; // something that could change the answer ended after it began
     }
-    answered.map(|(lane_id, _)| lane_id)
+    let (lane_id, assignment, launched_at) = answered?;
+    match assignment {
+        RestartAssignment::Ranking => (!work_ended).then_some((lane_id, false)),
+        RestartAssignment::MeasuredContract { statement } => {
+            let state = crate::core::support::state_root(paths);
+            let lead = read_json(&state.join(format!("{cycle_id}-lab-director-hypothesis.json"))).ok()?;
+            let standing = lead.pointer("/selected_hypothesis/statement").or_else(|| lead.get("statement")).and_then(Value::as_str)?;
+            let respecified = modified(state.join(format!("{cycle_id}-analysis-contract-policy.json"))).is_some_and(|at| at > launched_at);
+            (!statement.is_empty() && statement == standing && !respecified).then_some((lane_id, true))
+        }
+    }
+}
+
+pub(crate) fn restart_analyst_that_answered_this_state(paths: &AppPaths, cycle_id: &str) -> Option<String> {
+    restart_answer(paths, cycle_id).map(|(lane_id, _)| lane_id)
 }
 
 /// Tell the director, once per answer, that the restart it is waiting on was
 /// answered and that nothing has moved since.
-fn hand_restart_answer_to_director(paths: &AppPaths, cycle_id: &str, answered_by: &str) {
+fn hand_restart_answer_to_director(paths: &AppPaths, cycle_id: &str, answered_by: &str, measured_contract: bool) {
     let notices = crate::core::support::harness_notices_path(paths, cycle_id);
     let marker = format!("\"answered_by\":\"{answered_by}\"");
     let told = fs::read_to_string(&notices)
@@ -75,10 +127,16 @@ fn hand_restart_answer_to_director(paths: &AppPaths, cycle_id: &str, answered_by
         return;
     }
     let lane_dir = crate::core::support::lane_root(paths, cycle_id, answered_by);
-    let message = format!(
-        "The gate still asks for the hypothesis set to be restarted, and no analyst was opened for it this time. Analyst {answered_by} already took that assignment, and no engineer, runner, scout, gatekeeper or other analyst lane has ended since it began: a new analyst would be given the same inputs and return the same answer. Read its answer at {} (its notes and files are in the same directory). If it says the validation cannot be prepared because something does not exist yet -- data, a held-out run, a registered specification -- then producing that is the next move and it is yours to order: a standing order to the role that can produce it, or a simulation order. If instead the lead should change, change it. Another analyst will be opened for the restart once some lane's work has ended.",
-        lane_dir.join("result.json").display()
-    );
+    let answer_path = lane_dir.join("result.json").display().to_string();
+    let message = if measured_contract {
+        format!(
+            "The gate still asks for the hypothesis set to be restarted, and no analyst was opened for it this time. Analyst {answered_by} already took that assignment. The lead's registered contract has a verified primary measurement, so what that analyst was assigned -- and what a new one would be assigned -- is to interpret that measurement; no lab-runner has ended since it began and the lead and its registered specification are unchanged, so a new analyst would be handed the same measurement and return the same report. An engineer's pilot or a review ending does not change that assignment. Read its answer at {answer_path} (its notes and files are in the same directory). If the measurement says the design is invalid or the lead should change, changing the lead or its specification is yours. Analysis you want of newer results is a standing order addressed to the analyst: it is carried out as you write it. Another analyst will be opened for the restart once a lab-runner measures something new or the lead changes."
+        )
+    } else {
+        format!(
+            "The gate still asks for the hypothesis set to be restarted, and no analyst was opened for it this time. Analyst {answered_by} already took that assignment, and no engineer, runner, scout, gatekeeper or other analyst lane has ended since it began: a new analyst would be given the same inputs and return the same answer. Read its answer at {answer_path} (its notes and files are in the same directory). If it says the validation cannot be prepared because something does not exist yet -- data, a held-out run, a registered specification -- then producing that is the next move and it is yours to order: a standing order to the role that can produce it, or a simulation order. If instead the lead should change, change it. Another analyst will be opened for the restart once some lane's work has ended."
+        )
+    };
     let item = json!({
         "type": "supervisor_instruction",
         "payload": {"issue_code": "gate_restart_already_answered", "severity": "process_attention", "instance": answered_by, "message": message}
@@ -92,7 +150,8 @@ fn hand_restart_answer_to_director(paths: &AppPaths, cycle_id: &str, answered_by
         json!({
             "answered_by": answered_by,
             "director_lanes": lanes.iter().filter_map(|lane| lane.get("lane_id").cloned()).collect::<Vec<_>>(),
-            "detail": "the gate asked for a restart again; the newest restart analyst completed and nothing that could change its answer has ended since it was launched, so no analyst was opened and the director was told",
+            "assignment": if measured_contract { "interpret the measured contract" } else { "rank replacement leads" },
+            "detail": "the gate asked for a restart again; the newest restart analyst completed and nothing that could change its answer has happened since it was launched, so no analyst was opened and the director was told",
         }),
     );
 }
@@ -339,9 +398,9 @@ pub(crate) fn dispatch_gate_restart_followups(
             created_by_role,
             created_by_action,
         );
-    let already_answered = if analyst_due { restart_analyst_that_answered_this_state(paths, cycle_id) } else { None };
-    if let Some(answered_by) = already_answered.as_deref() {
-        hand_restart_answer_to_director(paths, cycle_id, answered_by);
+    let already_answered = if analyst_due { restart_answer(paths, cycle_id) } else { None };
+    if let Some((answered_by, measured_contract)) = already_answered.as_ref() {
+        hand_restart_answer_to_director(paths, cycle_id, answered_by, *measured_contract);
     }
 
     if analyst_due && already_answered.is_none() {
@@ -552,6 +611,70 @@ mod restart_answer_tests {
         assert_eq!(restart_analyst_that_answered_this_state(&paths, "c"), None);
         lane(&paths, "followup-analyst-1642", "analyst", "gate_restart_followup", 56, 63, "completed");
         assert_eq!(restart_analyst_that_answered_this_state(&paths, "c").as_deref(), Some("followup-analyst-1642"));
+    }
+
+    /// A restart analyst as the measured-contract binding leaves it.
+    fn renamed_restart_analyst(paths: &AppPaths, lane_id: &str, statement: &str, launched: u64, ended: u64) {
+        lane(paths, lane_id, "analyst", "runner_result_interpretation_followup", launched, ended, "completed");
+        let plan = json!({
+            "action_type": "runner_result_interpretation_followup", "role": "analyst", "source_brief_id": "followup-runner-862",
+            "planner_metadata": {"novelty_mode": "gate-restart-rerank", "analysis_contract": {"statement": statement}}
+        });
+        touch(&cycle_lanes_root(paths, "c").join(lane_id).join("role-plan.json"), &serde_json::to_string_pretty(&plan).unwrap(), at(launched));
+    }
+
+    fn lead(paths: &AppPaths, statement: &str) {
+        let state = crate::core::support::state_root(paths);
+        fs::create_dir_all(&state).unwrap();
+        fs::write(state.join("c-lab-director-hypothesis.json"), json!({"selected_hypothesis": {"statement": statement}}).to_string()).unwrap();
+    }
+
+    // MEASURED: 89 renamed restart analysts after runner 862, each taken for
+    // another analyst's work; 29 engineer pilots ended meanwhile.
+    #[test]
+    fn a_restart_analyst_renamed_by_a_measured_contract_is_still_the_answer_until_what_it_interprets_changes() {
+        let (_temp, paths) = fixture();
+        lead(&paths, "five classes share support");
+        lane(&paths, "followup-runner-862", "lab-runner", "methods_followup", 0, 10, "completed");
+        renamed_restart_analyst(&paths, "followup-analyst-1680", "five classes share support", 13, 15);
+        assert_eq!(restart_answer(&paths, "c"), Some(("followup-analyst-1680".to_string(), true)));
+        // The next renamed one is the newest answer, not work that reopens the restart.
+        renamed_restart_analyst(&paths, "followup-analyst-1681", "five classes share support", 19, 20);
+        assert_eq!(restart_analyst_that_answered_this_state(&paths, "c").as_deref(), Some("followup-analyst-1681"));
+        // An engineer's pilot, a review, a director and an ordered analyst end: same measurement, same assignment.
+        lane(&paths, "followup-engineer-1368", "engineer", "simulation_data_generation_followup", 21, 40, "failed");
+        lane(&paths, "followup-gatekeeper-2104", "gatekeeper", "independent_gate_review_followup", 41, 44, "completed");
+        lane(&paths, "followup-lab-director-2137", "lab-director", "blocking_lane_recovery_planning", 45, 50, "completed");
+        lane(&paths, "followup-analyst-1809", "analyst", "labdirector_comparator_validation_followup", 51, 55, "completed");
+        assert_eq!(restart_analyst_that_answered_this_state(&paths, "c").as_deref(), Some("followup-analyst-1681"));
+        // The director restates the lead: a new analyst would be assigned something else.
+        lead(&paths, "four classes share support");
+        assert_eq!(restart_analyst_that_answered_this_state(&paths, "c"), None);
+        lead(&paths, "five classes share support");
+        assert_eq!(restart_analyst_that_answered_this_state(&paths, "c").as_deref(), Some("followup-analyst-1681"));
+        // The registered specification is rewritten after it began.
+        let policy = crate::core::support::state_root(&paths).join("c-analysis-contract-policy.json");
+        touch(&policy, "{}", at(18));
+        assert_eq!(restart_analyst_that_answered_this_state(&paths, "c").as_deref(), Some("followup-analyst-1681"));
+        touch(&policy, "{}", at(60));
+        assert_eq!(restart_analyst_that_answered_this_state(&paths, "c"), None);
+        touch(&policy, "{}", at(18));
+        // A lab-runner ends: there is something new to interpret.
+        lane(&paths, "followup-runner-863", "lab-runner", "methods_followup", 61, 70, "completed");
+        assert_eq!(restart_analyst_that_answered_this_state(&paths, "c"), None);
+    }
+
+    #[test]
+    fn an_interpretation_nobody_opened_for_the_restart_is_work_and_no_readable_lead_leaves_it_open() {
+        let (_temp, paths) = fixture();
+        lead(&paths, "five classes share support");
+        lane(&paths, "followup-analyst-1641", "analyst", "gate_restart_followup", 20, 30, "completed");
+        // A post-run interpretation the harness opened for a runner: it is not a restart analyst.
+        lane(&paths, "followup-analyst-1700", "analyst", "runner_result_interpretation_followup", 31, 38, "completed");
+        assert_eq!(restart_analyst_that_answered_this_state(&paths, "c"), None);
+        let (_temp, paths) = fixture();
+        renamed_restart_analyst(&paths, "followup-analyst-1680", "five classes share support", 13, 15);
+        assert_eq!(restart_analyst_that_answered_this_state(&paths, "c"), None, "no lead file: nothing says the assignment is the same");
     }
 
     #[test]
