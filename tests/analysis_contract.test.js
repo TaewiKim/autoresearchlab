@@ -282,8 +282,8 @@ test("a measured contract routes the analyst to interpretation instead of anothe
 });
 
 test("a director's standing order to an analyst is carried out as written on a measured contract",()=>{
-  // MEASURED ON cycle-a-20260919, 2026-11-23: 42 analysts opened for
-  // 20 director orders after runner 862 were each told to interpret runner 862.
+  // MEASURED ON cycle-a-20260919, 2026-11-23: 31 analysts opened for
+  // 15 director orders after runner 862 were each told to interpret runner 862.
   const f=fixture(), contract=currentAnalysisContract(f.root,"c");
   const measurements=[{lane_id:"followup-runner-862",result_path:"/lanes/followup-runner-862/result.json",primary_contrasts:[{
     contrast_id:"success_gap:diffusion_policy_minus_act",estimate:"",simultaneous_lower:"",simultaneous_upper:"",status:"not_estimable_design_invalid",

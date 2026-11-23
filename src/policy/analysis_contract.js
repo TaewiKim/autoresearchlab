@@ -197,12 +197,12 @@ function measurementInstruction(measurements) {
 // The LabDirector's standing order this lane was opened for, when it has one.
 //
 // MEASURED ON cycle-a-20260919, 2026-11-23: after runner 862 measured
-// the contract (2026-11-22T17:10Z), directors 2104-2137 addressed 20 standing
-// orders to an analyst. Every lane opened for one -- 42 of them, three per
-// order until its attempts ran out -- was rebound here to "interpret runner
-// 862", an interpretation 89 gate-restart analysts were also writing. None
-// carried out what its director asked: 13 orders ended cancelled, 5 superseded.
-// The order survives in review_action; it is the assignment.
+// the contract (2026-11-22T17:10Z), 31 analyst lanes were opened for 15
+// standing orders of directors 2104-2137, up to four per order as its attempts
+// ran out. Each was rebound here to "interpret runner 862", the interpretation
+// 92 gate-restart analysts were also writing. None carried out what its
+// director asked: 11 of the 15 orders ended cancelled, 3 superseded, and one
+// was still standing. The order survives in review_action; it is the assignment.
 function directorOrder(plan) {
   const order = plan.planner_metadata?.review_action;
   const asked = typeof order?.description === "string" ? order.description.trim() : "";
