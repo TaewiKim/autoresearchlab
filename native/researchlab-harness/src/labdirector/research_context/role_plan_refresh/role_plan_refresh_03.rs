@@ -223,6 +223,40 @@ pub(crate) fn note_contract_already_measured(
     );
 }
 
+/// Whether an interpretation lane answers `runner_lane_id`: it names that runner,
+/// or it was dispatched for it and the measured-contract binding renamed it.
+///
+/// MEASURED ON cycle-a-20260919, 2026-11-25: twelve analysts
+/// (1816-1838) were dispatched to interpret supporting Runner 864, one about two
+/// minutes after the previous one ended. The binding renames each to the
+/// contract's primary measurement, Runner 862, so neither the gate-ready report
+/// nor the three-review cap below ever counted one of them for 864. The
+/// dispatch identity survives in planner_metadata.review_action, as
+/// work_orders.rs reads it.
+pub(crate) fn interpretation_answers_runner(
+    role_plan_path: &Path,
+    source_brief_id: Option<&str>,
+    runner_lane_id: &str,
+) -> bool {
+    if source_brief_id == Some(runner_lane_id) {
+        return true;
+    }
+    // Only a plan that names the runner at all is worth parsing.
+    let Ok(raw) = fs::read_to_string(role_plan_path) else {
+        return false;
+    };
+    if !raw.contains(&format!("\"{runner_lane_id}\"")) {
+        return false;
+    }
+    let Ok(plan) = serde_json::from_str::<Value>(&raw) else {
+        return false;
+    };
+    plan.pointer("/planner_metadata/analysis_request/source").and_then(Value::as_str)
+        == Some("measured-contract-interpretation")
+        && plan.pointer("/planner_metadata/review_action/brief_id").and_then(Value::as_str)
+            == Some(runner_lane_id)
+}
+
 pub(crate) fn completed_analyst_post_run_report_exists(
     paths: &AppPaths,
     cycle_id: &str,
@@ -243,7 +277,7 @@ pub(crate) fn completed_analyst_post_run_report_exists(
         };
         if role_plan.role.as_deref() != Some("analyst")
             || role_plan.action_type.as_deref() != Some("runner_result_interpretation_followup")
-            || role_plan.source_brief_id.as_deref() != Some(runner_lane_id)
+            || !interpretation_answers_runner(&role_plan_path, role_plan.source_brief_id.as_deref(), runner_lane_id)
         {
             continue;
         }
@@ -281,7 +315,7 @@ pub(crate) fn completed_analyst_post_run_review_count(
         };
         if role_plan.role.as_deref() != Some("analyst")
             || role_plan.action_type.as_deref() != Some("runner_result_interpretation_followup")
-            || role_plan.source_brief_id.as_deref() != Some(runner_lane_id)
+            || !interpretation_answers_runner(&role_plan_path, role_plan.source_brief_id.as_deref(), runner_lane_id)
         {
             continue;
         }
@@ -875,6 +909,67 @@ pub(crate) fn push_analyst_handoff_followup_action(
 #[cfg(test)]
 mod runner_context_revision_tests {
     use super::*;
+
+    fn interpretation_plan(dir: &Path, source_brief_id: &str, binding: Option<(&str, &str)>) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+        let mut plan = serde_json::json!({
+            "role": "analyst",
+            "action_type": "runner_result_interpretation_followup",
+            "source_brief_id": source_brief_id,
+            "planner_metadata": {}
+        });
+        if let Some((source, dispatched_for)) = binding {
+            plan["planner_metadata"] = serde_json::json!({
+                "analysis_request": {"source": source, "runner_lane_id": source_brief_id},
+                "review_action": {"type": "runner_result_interpretation_followup", "brief_id": dispatched_for}
+            });
+        }
+        let path = dir.join("role-plan.json");
+        fs::write(&path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+        path
+    }
+
+    // MEASURED: analysts 1816-1838, dispatched for Runner 864 and renamed to 862.
+    #[test]
+    fn an_interpretation_renamed_by_the_binding_still_answers_the_runner_it_was_dispatched_for() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let renamed = interpretation_plan(
+            &temp.path().join("followup-analyst-1838"),
+            "followup-runner-862",
+            Some(("measured-contract-interpretation", "followup-runner-864")),
+        );
+        assert!(interpretation_answers_runner(&renamed, Some("followup-runner-862"), "followup-runner-864"));
+        assert!(interpretation_answers_runner(&renamed, Some("followup-runner-862"), "followup-runner-862"));
+        assert!(!interpretation_answers_runner(&renamed, Some("followup-runner-862"), "followup-runner-865"));
+        // Named in review_action but never renamed by the binding: not an answer.
+        let unbound = interpretation_plan(
+            &temp.path().join("followup-analyst-1700"),
+            "followup-runner-862",
+            Some(("runner-result-analyst-interpretation", "followup-runner-864")),
+        );
+        assert!(!interpretation_answers_runner(&unbound, Some("followup-runner-862"), "followup-runner-864"));
+    }
+
+    #[test]
+    fn three_renamed_interpretations_reach_the_review_cap_for_the_runner_they_were_dispatched_for() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let paths = AppPaths {
+            project_root: temp.path().to_path_buf(),
+            runtime_root: temp.path().join(".research-lab"),
+            data_root: temp.path().join("data"),
+            stats_driver_script: PathBuf::new(),
+            literature_driver_script: PathBuf::new(),
+        };
+        for n in [1822, 1823, 1825] {
+            let dir = cycle_lanes_root(&paths, "c").join(format!("followup-analyst-{n}"));
+            interpretation_plan(&dir, "followup-runner-862", Some(("measured-contract-interpretation", "followup-runner-864")));
+            fs::write(dir.join("final-status.json"), r#"{"status": "completed"}"#).unwrap();
+            fs::write(dir.join("result.json"), "{}").unwrap();
+        }
+        assert_eq!(completed_analyst_post_run_review_count(&paths, "c", "followup-runner-864").unwrap(), 3);
+        assert_eq!(completed_analyst_post_run_review_count(&paths, "c", "followup-runner-862").unwrap(), 3);
+        assert_eq!(completed_analyst_post_run_review_count(&paths, "c", "followup-runner-865").unwrap(), 0);
+    }
 
     #[test]
     fn satisfied_analyst_standard_routes_to_interpretation_even_if_inconclusive() {
