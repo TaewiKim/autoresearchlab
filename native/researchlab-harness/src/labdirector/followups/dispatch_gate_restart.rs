@@ -111,6 +111,27 @@ fn restart_answer(paths: &AppPaths, cycle_id: &str) -> Option<(String, bool)> {
     }
 }
 
+/// A gate-restart analyst that has been opened and has not ended.
+///
+/// MEASURED ON cycle-a-20260919, 2026-11-23: runner 864 ended at
+/// 06:40Z, so the newest completed restart analyst no longer answered, and the
+/// dispatcher opened analyst 1817 for the restart at 06:46Z and analyst 1818 at
+/// 06:53Z while 1817 had not yet started: the guard looked only at lanes that
+/// had ended. Both were handed the same assignment.
+pub(crate) fn open_restart_analyst(paths: &AppPaths, cycle_id: &str) -> Option<String> {
+    let mut open: Vec<String> = fs::read_dir(cycle_lanes_root(paths, cycle_id))
+        .ok()?
+        .flatten()
+        .filter(|entry| {
+            let lane_dir = entry.path();
+            !lane_dir.join("final-status.json").exists() && lane_dir.join("role-plan.json").exists() && restart_assignment(&lane_dir).is_some()
+        })
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .collect();
+    open.sort();
+    open.into_iter().next()
+}
+
 pub(crate) fn restart_analyst_that_answered_this_state(paths: &AppPaths, cycle_id: &str) -> Option<String> {
     restart_answer(paths, cycle_id).map(|(lane_id, _)| lane_id)
 }
@@ -398,12 +419,14 @@ pub(crate) fn dispatch_gate_restart_followups(
             created_by_role,
             created_by_action,
         );
-    let already_answered = if analyst_due { restart_answer(paths, cycle_id) } else { None };
+    // One that is still open holds the restart; nothing is due and nobody is told.
+    let held_by_open = analyst_due && open_restart_analyst(paths, cycle_id).is_some();
+    let already_answered = if analyst_due && !held_by_open { restart_answer(paths, cycle_id) } else { None };
     if let Some((answered_by, measured_contract)) = already_answered.as_ref() {
         hand_restart_answer_to_director(paths, cycle_id, answered_by, *measured_contract);
     }
 
-    if analyst_due && already_answered.is_none() {
+    if analyst_due && !held_by_open && already_answered.is_none() {
         let attempt = next_dispatch_action_attempt(
             "analyst",
             action_type,
@@ -662,6 +685,28 @@ mod restart_answer_tests {
         // A lab-runner ends: there is something new to interpret.
         lane(&paths, "followup-runner-863", "lab-runner", "methods_followup", 61, 70, "completed");
         assert_eq!(restart_analyst_that_answered_this_state(&paths, "c"), None);
+    }
+
+    // MEASURED: analysts 1817 and 1818 opened seven minutes apart, neither started.
+    #[test]
+    fn a_restart_analyst_that_has_not_ended_holds_the_restart_whatever_the_binding_called_it() {
+        let (_temp, paths) = fixture();
+        lead(&paths, "five classes share support");
+        assert_eq!(open_restart_analyst(&paths, "c"), None);
+        renamed_restart_analyst(&paths, "followup-analyst-1814", "five classes share support", 13, 15);
+        assert_eq!(open_restart_analyst(&paths, "c"), None, "an ended one holds nothing");
+        // Opened after runner 864, renamed by the binding, not yet started.
+        renamed_restart_analyst(&paths, "followup-analyst-1817", "five classes share support", 20, 21);
+        fs::remove_file(cycle_lanes_root(&paths, "c").join("followup-analyst-1817").join("final-status.json")).unwrap();
+        assert_eq!(open_restart_analyst(&paths, "c").as_deref(), Some("followup-analyst-1817"));
+        // Neither is an open analyst someone else ordered.
+        let (_temp, paths) = fixture();
+        lane(&paths, "followup-analyst-1819", "analyst", "labdirector_comparator_validation_followup", 20, 21, "completed");
+        fs::remove_file(cycle_lanes_root(&paths, "c").join("followup-analyst-1819").join("final-status.json")).unwrap();
+        assert_eq!(open_restart_analyst(&paths, "c"), None);
+        lane(&paths, "followup-analyst-1820", "analyst", "gate_restart_followup", 22, 23, "completed");
+        fs::remove_file(cycle_lanes_root(&paths, "c").join("followup-analyst-1820").join("final-status.json")).unwrap();
+        assert_eq!(open_restart_analyst(&paths, "c").as_deref(), Some("followup-analyst-1820"));
     }
 
     #[test]
