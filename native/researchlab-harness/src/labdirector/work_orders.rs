@@ -954,7 +954,9 @@ fn dropped_actions() -> &'static std::sync::Mutex<BTreeMap<String, u32>> {
 /// gate reviews stopped, run-plan opened nothing for over an hour while the plan
 /// held fourteen ranked actions, and nothing recorded which filter dropped each.
 pub(crate) fn trace_dropped_action(action: &Value, line: u32) {
-    trace_order(action, &format!("dropped by the dispatcher filter at dispatch.rs:{line}"));
+    if line > 0 {
+        trace_order(action, &format!("dropped by the dispatcher filter at dispatch.rs:{line}"));
+    }
     let field = |key: &str| action.get(key).and_then(Value::as_str).unwrap_or("").to_string();
     let key = format!("{}|{}|{}", field("preferred_role"), field("type"), field("brief_id"));
     if let Ok(mut dropped) = dropped_actions().lock() {

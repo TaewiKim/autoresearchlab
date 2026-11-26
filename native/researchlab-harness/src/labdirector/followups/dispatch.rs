@@ -674,6 +674,8 @@ pub fn dispatch_followup_lanes(
         }
         gate_challenge_scope.truncate(8);
         trace_order(&action, "passed the filters; its role's branch opened no lane");
+        // Line 0: passed every filter above; a later line names the branch that dropped it.
+        trace_dropped_action(&action, 0);
 
         if action_type.starts_with("hypothesis_regeneration") {
             if created.len() < max_new_lanes
@@ -811,6 +813,7 @@ pub fn dispatch_followup_lanes(
                     }));
                 }
             }
+            trace_dropped_action(&action, line!());
             continue;
         }
 
@@ -846,6 +849,7 @@ pub fn dispatch_followup_lanes(
                 &mut created_by_role,
                 &mut created_by_action,
             )?;
+            trace_dropped_action(&action, line!());
             continue;
         }
 
@@ -879,6 +883,7 @@ pub fn dispatch_followup_lanes(
                             .filter(|value| *value > 0)
                             .unwrap_or(6);
                     if recovery_rounds >= max_recovery_rounds {
+                        trace_dropped_action(&action, line!());
                         continue;
                     }
                 }
@@ -976,6 +981,7 @@ pub fn dispatch_followup_lanes(
                     }));
                 }
             }
+            trace_dropped_action(&action, line!());
             continue;
         }
 
@@ -1007,6 +1013,7 @@ pub fn dispatch_followup_lanes(
                 &mut created_by_action,
             )?
         {
+            trace_dropped_action(&action, line!());
             continue;
         }
 
@@ -1120,6 +1127,7 @@ pub fn dispatch_followup_lanes(
             && !analyst_repair_must_stay_analyst
             && !role_available("analyst", action_type, &created_by_role, &created_by_action);
         if analyst_budget_blocked && (analyst_handoff_required || analyst_handoff_action_pending) {
+            trace_dropped_action(&action, line!());
             continue;
         }
         let (role, runtime_class, mode, prefix) = if analyst_budget_blocked {
@@ -1135,6 +1143,7 @@ pub fn dispatch_followup_lanes(
         let direct_handoff_runner_action =
             matches!(brief_id, "analyst-handoff" | "analyst-handoff-artifact");
         if analyst_handoff_action_pending && role == "lab-runner" && !direct_handoff_runner_action {
+            trace_dropped_action(&action, line!());
             continue;
         }
         let selected_scope_hypotheses = if action_type == "lab_director_requery_followup"
@@ -1164,6 +1173,7 @@ pub fn dispatch_followup_lanes(
             });
             if !value_mentions_current_geo(&action_statement_value, &current_hypothesis_accessions)
             {
+                trace_dropped_action(&action, line!());
                 continue;
             }
         }
@@ -1192,6 +1202,7 @@ pub fn dispatch_followup_lanes(
                 brief_id,
             )
         {
+            trace_dropped_action(&action, line!());
             continue;
         }
         if action_type == "runner_scientific_recovery_followup"
@@ -1202,12 +1213,14 @@ pub fn dispatch_followup_lanes(
                 brief_id,
             )
         {
+            trace_dropped_action(&action, line!());
             continue;
         }
         if role == "gatekeeper"
             && action_type == "independent_gate_review_followup"
             && open_independent_gate_review_for_rubric(paths, cycle_id, target_rubric)?
         {
+            trace_dropped_action(&action, line!());
             continue;
         }
         let gate_blocking_analyst_repair = role == "analyst"
@@ -1285,6 +1298,7 @@ pub fn dispatch_followup_lanes(
             && !duplicate_is_retryable_simulation_order
             || (!direct_handoff_runner_action && !runner_recovery_action && !role_action_available)
         {
+            trace_dropped_action(&action, line!());
             continue;
         }
         let lane_id = next_followup_lane_id(paths, cycle_id, prefix)?;

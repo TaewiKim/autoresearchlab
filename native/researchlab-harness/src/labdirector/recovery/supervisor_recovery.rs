@@ -530,6 +530,42 @@ pub(crate) fn supervisor_supersede_stale_pending_labdirector_requery(
     {
         return Ok(None);
     }
+    // MEASURED ON cycle-a-20260919, 2026-11-26: requeries 2097 and
+    // 2141 had waited since 2026-11-25 09:17 on
+    // "blocked-by-completed-labdirector-requery duplicate_requery=true": later
+    // directors had already answered them, so they could never start. Pending,
+    // they still counted as the open lab_director_requery_followup, and the
+    // dispatcher refused every new director requery behind them. With the lead
+    // withdrawn and no standing orders, run-plan opened nothing for 2.5 hours.
+    // The scheduler's own verdict is the test (lane_closed_for_good, which the
+    // supervisor interrupt already obeys since director 2010), so the two
+    // cannot disagree.
+    if lane_closed_for_good(paths, cycle_id, &contract.lane_id) {
+        let blocker = "blocked-by-completed-labdirector-requery: closed for good by the scheduler";
+        write_json(
+            &final_status_path,
+            &json!({
+                "lane_id": contract.lane_id,
+                "status": "aborted",
+                "completed_at": now_iso(),
+                "degraded": true,
+                "failure_category": "supervisor_superseded_answered_pending_labdirector_requery",
+                "role_plan_path": role_plan_path,
+                "supervisor_recovered": true,
+                "supervisor_recovery_reason": "a LabDirector requery completed after this one was queued",
+                "blocker": blocker,
+            }),
+        )?;
+        let action = json!({
+            "lane_id": contract.lane_id,
+            "action": "supersede_answered_pending_labdirector_requery",
+            "reason": "a completed LabDirector requery already answered this queued one; it could never start and held the requery slot",
+            "blocker": blocker,
+            "final_status_path": final_status_path,
+        });
+        append_event(&supervisor_events_path(paths, cycle_id), "supervisor_action", action.clone())?;
+        return Ok(Some(action));
+    }
     let latest_chronicle = latest_completed_followup_action_at(
         paths,
         cycle_id,

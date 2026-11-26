@@ -1316,3 +1316,61 @@ fn a_lane_the_scheduler_closed_for_good_does_not_stand_in_for_a_new_director() {
     assert_eq!(spawned.len(), 1, "the interrupt was skipped against a lane that will never run: {next}");
     assert_ne!(spawned[0]["lane_id"].as_str().unwrap(), first_lane);
 }
+
+// MEASURED ON cycle-a-20260919, 2026-11-26: requeries 2097 and 2141
+// stayed pending on a blocker nothing clears and, counted as the open director
+// requery, kept the dispatcher from opening any other for 2.5 hours.
+#[test]
+fn a_queued_requery_the_scheduler_closed_for_good_is_retired_so_it_frees_the_requery_slot() {
+    let tmp = TempDir::new().unwrap();
+    let paths = build_paths(tmp.path());
+    let cycle = "cycle-answered-requery";
+    fs::create_dir_all(plans_root(&paths)).unwrap();
+    let lane = "followup-lab-director-2141";
+    let root = cycle_lanes_root(&paths, cycle).join(lane);
+    fs::create_dir_all(&root).unwrap();
+    let contract = LaneContract {
+        cycle_id: cycle.to_string(),
+        lane_id: lane.to_string(),
+        role: "lab-director".to_string(),
+        runtime_class: "codex-agent".to_string(),
+        mode: "read-write-scoped".to_string(),
+        cwd: root.clone(),
+        task_file: root.join("task.md"),
+        allowed_inputs: Vec::new(),
+        allowed_outputs: Vec::new(),
+        output_artifact: None,
+        fallback_strategy: None,
+    };
+    write_json(&root.join("lane-contract.json"), &json!(contract)).unwrap();
+    write_json(
+        &root.join("role-plan.json"),
+        &json!({"role": "lab-director", "action_type": "lab_director_requery_followup",
+            "source_brief_id": "supervisor-instruction-gate_restart_already_answered-followup-analyst-1818"}),
+    )
+    .unwrap();
+
+    // Still able to run: left alone.
+    assert!(supervisor_supersede_stale_pending_labdirector_requery(&paths, cycle, &contract, &root)
+        .unwrap()
+        .is_none());
+    assert!(!root.join("final-status.json").exists());
+
+    write_json(
+        &plans_root(&paths).join(format!("{cycle}-run-summary.json")),
+        &json!({"pass_summaries": [{"pass": 3, "skipped": [
+            {"lane_id": lane, "reason": "blocked-by-completed-labdirector-requery duplicate_requery=true"}
+        ]}]}),
+    )
+    .unwrap();
+    let action = supervisor_supersede_stale_pending_labdirector_requery(&paths, cycle, &contract, &root)
+        .unwrap()
+        .expect("a requery that can never start is retired");
+    assert_eq!(action["action"], json!("supersede_answered_pending_labdirector_requery"));
+    let status = read_json(&root.join("final-status.json")).unwrap();
+    assert_eq!(status["status"], json!("aborted"));
+    assert_eq!(
+        status["failure_category"],
+        json!("supervisor_superseded_answered_pending_labdirector_requery")
+    );
+}
