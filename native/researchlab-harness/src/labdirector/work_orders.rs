@@ -477,6 +477,17 @@ struct EndedLane {
     displaced_order_id: Option<String>,
 }
 
+/// Read the assignment identity of a scout run under a different action.
+fn reassigned_scout_order(role_plan_path: &Path, briefs: &BTreeSet<String>) -> Option<(String, String)> {
+    let plan = read_role_plan_if_compact(role_plan_path).ok().flatten()?;
+    let brief = text(&plan, "source_brief_id");
+    let requested = plan.get("requested_action_type").and_then(Value::as_str)
+        .or_else(|| plan.pointer("/planner_metadata/requested_action_type").and_then(Value::as_str))?;
+    (briefs.contains(brief) && text(&plan, "role") == "scout"
+        && requested != text(&plan, "action_type") && work_order_dispatchable("scout", requested))
+        .then(|| (brief.to_string(), requested.to_string()))
+}
+
 /// The lanes opened for `order` that ended, completed or not, among the ended
 /// lanes of its brief.
 ///
@@ -524,15 +535,39 @@ fn ended_lanes_by_brief(paths: &AppPaths, cycle_id: &str, briefs: &BTreeSet<Stri
         }
         if let Some(fields) = read_role_plan_index_fields(&role_plan_path)? {
             let mut brief = fields.source_brief_id;
+            let role = fields.role.unwrap_or_default();
+            let mut action_type = fields.action_type.unwrap_or_default();
+            let mut completed = completed;
             let mut displaced_order_id = None;
+            // MEASURED ON cycle-a-20260919, 2026-11-25: at
+            // owner_selection, scouts 845 and 847 ran a data order under the
+            // scholarly literature route, and 848 resumed 845. The ledger saw
+            // none of the three attempts, so it held back both scout reports.
+            // Use the assigned action and walk the resume's dispatch lineage.
+            // A literature resume alone cannot fulfill the original data order.
+            if role == "scout" && !work_order_dispatchable(&role, &action_type) {
+                let origin = if matches!(action_type.as_str(), "adaptive_search_followup" | "abstract_review_followup") {
+                    literature_recovery_root(paths, cycle_id, lane_id)
+                } else {
+                    lane_id.to_string()
+                };
+                let resumed = origin != lane_id;
+                if resumed || brief.as_ref().is_some_and(|brief| briefs.contains(brief)) {
+                    let original_plan = lane_role_plan_path(paths, cycle_id, &origin);
+                    if let Some((original_brief, requested)) = reassigned_scout_order(&original_plan, briefs) {
+                        brief = Some(original_brief);
+                        action_type = requested;
+                        completed &= !resumed;
+                    }
+                }
+            }
             // MEASURED ON cycle-a-20260919, 2026-11-22: 14 of 52
             // completed interpretations were attempts at wo-e9fcb4a95b. The
             // measured-contract binding replaced their brief with Runner 857,
             // so the order never exhausted its attempts and held Engineer
             // 1293's result back from the LabDirector. The original dispatch
             // identity survives in review_action. Count it as unfulfilled.
-            if fields.role.as_deref() == Some("analyst")
-                && fields.action_type.as_deref() == Some("runner_result_interpretation_followup")
+            if role == "analyst" && action_type == "runner_result_interpretation_followup"
             {
                 if let Some(plan) = read_role_plan_if_compact(&role_plan_path).ok().flatten() {
                     if plan.pointer("/planner_metadata/analysis_request/source").and_then(Value::as_str)
@@ -552,8 +587,8 @@ fn ended_lanes_by_brief(paths: &AppPaths, cycle_id: &str, briefs: &BTreeSet<Stri
             if let Some(brief) = brief.filter(|brief| briefs.contains(brief)) {
                 found.entry(brief).or_default().push(EndedLane {
                     lane_id: lane_id.to_string(),
-                    role: fields.role.unwrap_or_default(),
-                    action_type: fields.action_type.unwrap_or_default(),
+                    role,
+                    action_type,
                     completed,
                     displaced_order_id,
                 });
@@ -941,6 +976,14 @@ pub(crate) fn work_orders_in_flight(paths: &AppPaths, cycle_id: &str) -> bool {
                     .or_else(|| parse_time(order.get("issued_at")))
                     .is_some_and(|since| now - since < hold)
         })
+}
+
+/// Scout attempts whose existing work-order cap returned the decision to the Director.
+pub(crate) fn returned_scout_order_attempts(paths: &AppPaths, cycle_id: &str) -> BTreeSet<String> {
+    orders(&load_ledger(paths, cycle_id)).iter()
+        .filter(|order| text(order, "role") == "scout" && text(order, "outcome") == "not_carried_out")
+        .flat_map(|order| lane_list(order, "done_lanes"))
+        .collect()
 }
 
 /// MemTotal, MemAvailable and SwapFree of a /proc/meminfo text, in MiB.

@@ -1105,6 +1105,64 @@ fn gate_review_dispatch_preserves_the_briefed_lead_key() {
 }
 
 #[test]
+fn no_gate_review_is_opened_while_the_lead_is_withdrawn() {
+    // MEASURED ON cycle-a-20260919, 2026-11-25/26: with the lead
+    // withdrawn, each plan opened five rubric reviews that waited at launch,
+    // a recovery director retired them, and the next plan opened five more --
+    // 85 gatekeepers in 17 rounds with no successor screened.
+    let tmp = TempDir::new().unwrap();
+    let paths = build_paths(tmp.path());
+    let cycle = "cycle-gate-review-after-withdrawal";
+    fs::create_dir_all(plans_root(&paths)).unwrap();
+    fs::create_dir_all(cycle_lanes_root(&paths, cycle)).unwrap();
+    write_json(
+        &plans_root(&paths).join(format!("{cycle}-cycle-plan.json")),
+        &json!({"objective": "Select a successor after withdrawal."}),
+    )
+    .unwrap();
+    write_stage_gate_search_inputs(&paths, cycle);
+    write_stage_gate_kg(&paths, cycle);
+    let lead_path = state_root(&paths).join(format!("{cycle}-lab-director-hypothesis.json"));
+    write_json(
+        &state_root(&paths).join(format!("{cycle}-conclusion-review.json")),
+        &json!({"conclusion_gate_passed": true, "conclusion_score": 96}),
+    )
+    .unwrap();
+    write_json(
+        &state_root(&paths).join(format!("{cycle}-approval-review.json")),
+        &json!({"approval_gate_passed": false, "approval_readiness_score": 63}),
+    )
+    .unwrap();
+    write_json(
+        &state_root(&paths).join(format!("{cycle}-gate-review.json")),
+        &json!({
+            "gate_passed": false,
+            "gatekeeper_pending_rubrics": ["impact"],
+            "recommended_followup_actions": [{
+                "type": "independent_gate_review_followup",
+                "preferred_role": "gatekeeper",
+                "priority": "high",
+                "target_rubric": "impact",
+                "gate_review_lead_key": null,
+                "description": "review impact"
+            }]
+        }),
+    )
+    .unwrap();
+    write_json(
+        &lead_path,
+        &json!({"status": "withdrawn", "requery_decision": "restart", "selected_hypothesis": null}),
+    )
+    .unwrap();
+    assert!(lead_is_withdrawn(&paths, cycle));
+    let created = dispatch_followup_lanes(&paths, cycle, 3).unwrap();
+    assert!(
+        !created.iter().any(|item| item.get("role").and_then(Value::as_str) == Some("gatekeeper")),
+        "no claim stands to review: {created:#?}"
+    );
+}
+
+#[test]
 fn focused_gatekeeper_retry_allowed_for_pending_rubric_without_open_lane() {
     let tmp = TempDir::new().unwrap();
     let paths = build_paths(tmp.path());

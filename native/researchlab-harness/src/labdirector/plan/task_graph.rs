@@ -810,7 +810,7 @@ fn is_literature_resume_lane(lane_dir: &Path) -> bool {
         })
 }
 
-fn literature_recovery_root(paths: &AppPaths, cycle_id: &str, lane_id: &str) -> String {
+pub(crate) fn literature_recovery_root(paths: &AppPaths, cycle_id: &str, lane_id: &str) -> String {
     let mut current = lane_id.to_string();
     let mut seen = HashSet::new();
     while seen.insert(current.clone()) {
@@ -891,6 +891,7 @@ fn latest_literature_recovery_sources(
     cycle_id: &str,
 ) -> Result<HashSet<String>> {
     let mut newest_by_root: HashMap<String, (String, String)> = HashMap::new();
+    let returned_attempts = super::work_orders::returned_scout_order_attempts(paths, cycle_id);
     for (lane_id, lane_dir) in lane_dirs_from_contract_index(paths, cycle_id)? {
         let final_status_path = lane_dir.join("final-status.json");
         let result_path = lane_dir.join("result.json");
@@ -924,6 +925,9 @@ fn latest_literature_recovery_sources(
             continue;
         }
         let root = literature_recovery_root(paths, cycle_id, &lane_id);
+        if returned_attempts.contains(&root) || returned_attempts.contains(&lane_id) {
+            continue;
+        }
         let completed_at = final_status
             .get("completed_at")
             .and_then(Value::as_str)

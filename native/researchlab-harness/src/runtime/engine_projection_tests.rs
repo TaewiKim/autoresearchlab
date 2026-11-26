@@ -662,6 +662,277 @@
     }
 
     #[test]
+    fn rerouted_scout_attempts_return_results_at_measured_simulation_churn() {
+        // MEASURED ON cycle-a-20260919, 2026-11-25: 67 simulation
+        // lanes finished while at owner_selection. After withdrawal, the data order
+        // still held back scout 846's novelty audit. Two rerouted data scouts
+        // (845, 847) and the adaptive resume of 845 (848) had already ended.
+        use crate::labdirector::{announce_work_order_results, collect_failed_literature_recovery_actions, work_orders_in_flight};
+        use serde_json::Value;
+        let (dir, paths, hypothesis_path) = lead_hold_setup(lead_hold_now_ms() - 60_000);
+        let state = |kind, value| {
+            lead_hold_write(&paths.runtime_root.join(format!("state/cycle-test-{kind}.json")), value);
+        };
+        lead_hold_write(&hypothesis_path, json!({
+            "status": "withdrawn", "selected_hypothesis": null, "requery_decision": "restart",
+            "projection_source": "lab_director_lane_result", "generated_by": "followup-lab-director-2154",
+        }));
+        for (kind, value) in [
+            ("field-landscape", json!({"subfields": [{}]})),
+            ("frontier-harvest", json!({"top_k": [{"review_status": "accepted"}]})),
+            ("sota-cards", json!({"cards": [{}]})),
+            ("field-beliefs", json!({"beliefs": [{}]})),
+            ("candidate-slate", json!({"candidates": [{}]})),
+            ("expert-panel", json!({"ranking": [{}]})),
+            ("novelty-audit", json!({"audits": [{}]})),
+            ("candidate-feasibility", json!({"assessments": [{}]})),
+            ("expert-selection", json!({"rounds": [{"spent_round": {"owner_selection": {
+                "candidate_id": "release", "decision": "slate_released", "selected_at": "2026-11-09T02:40:34Z",
+            }}}]})),
+        ] {
+            state(kind, value);
+        }
+        let stamp = |minutes| (chrono::Utc::now() - chrono::Duration::minutes(minutes))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let issuer = "followup-lab-director-2153";
+        let brief = format!("labdirector-next-action-{issuer}");
+        let order = |id, action| json!({
+            "order_id": id, "source": "lab-director", "brief_id": brief, "issued_by": issuer,
+            "issued_at": stamp(75), "recorded_at": stamp(75), "lead_key": "withdrawn",
+            "role": "scout", "type": action, "description": "Return an audit disposition.",
+            "status": "standing", "done_at": null, "reported_at": null,
+            "done_lanes": [],
+        });
+        state("work-orders", json!({"watermark": stamp(74), "orders": [
+            order("wo-5e0318d3b1", "novelty_followup"),
+            order("wo-a4e7863f3d", "data_acquisition_followup"),
+        ]}));
+        let lanes = paths.runtime_root.join("lanes/cycle-test");
+        let finish = |id: &str, status, plan| {
+            let lane = lanes.join(id);
+            lead_hold_write(&lane.join("role-plan.json"), plan);
+            lead_hold_write(&lane.join("final-status.json"), json!({
+                "lane_id": id, "status": status, "completed_at": stamp(4),
+            }));
+            lane
+        };
+        for n in 0..67 {
+            finish(&format!("followup-engineer-{}", 1322 + n), if n < 54 { "failed" } else { "completed" },
+                json!({"role": "engineer", "action_type": "simulation_data_generation_followup"}));
+        }
+        let write_scout = |id: &str, action: &str, source: &str, requested: Value, failure: &str| {
+            let lane = finish(id, if failure.is_empty() { "completed" } else { "failed" }, json!({
+                "role": "scout", "action_type": action, "source_brief_id": source,
+                "requested_action_type": requested,
+            }));
+            lead_hold_write(&lane.join("result.json"), json!({
+                "status": if failure.is_empty() { "completed" } else { "insufficient_corpus" },
+                "failure_category": failure, "returncode": 0,
+                "extracted_json": {"validation_ready": false, "first_unbound_field": "realized allocation effort"},
+                "recommended_actions": if failure.is_empty() { json!([]) } else { json!([
+                    {"type": "adaptive_search_followup", "source_lane_id": id}
+                ]) },
+            }));
+        };
+        write_scout("followup-scout-845", "reasoning_literature_scout", &brief,
+            json!("data_acquisition_followup"), "adaptive_literature_search_incomplete");
+        write_scout("followup-scout-846", "novelty_followup", &brief, Value::Null, "");
+        write_scout("followup-scout-847", "reasoning_literature_scout", &brief,
+            json!("data_acquisition_followup"), "adaptive_literature_search_incomplete");
+        write_scout("followup-scout-849", "reasoning_literature_scout", &brief, Value::Null, "");
+        assert!(announce_work_order_results(&paths, "cycle-test").unwrap().is_empty(),
+            "two failed attempts and an unrelated search must not exhaust the order");
+        assert!(work_orders_in_flight(&paths, "cycle-test"));
+        let mut recoveries = Vec::new();
+        collect_failed_literature_recovery_actions(&paths, "cycle-test", &mut recoveries).unwrap();
+        assert!(recoveries.iter().any(|action| action["source_lane_id"] == "followup-scout-845"));
+        write_scout("followup-scout-848", "adaptive_search_followup", "followup-scout-845",
+            Value::Null, "literature_retrieval_throttled");
+        let progress = || {
+            let output = std::process::Command::new("node").arg("-e").arg(r#"
+                const m = require(process.argv[1]);
+                const progress = m.deriveProgress({cwd: process.argv[2], cycleId: 'cycle-test'});
+                console.log(JSON.stringify({progress, findings: m.stallFindings({progress, config: m.supervisorConfig({})})}));
+            "#).arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../src/orchestrator/cycle_progress.js"))
+                .arg(dir.path()).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            serde_json::from_slice::<Value>(&output.stdout).unwrap()
+        };
+        let signature = "lane_churn:owner_selection:simulation_data_generation_followup";
+        let stuck = progress();
+        assert_eq!(stuck["progress"]["current_milestone"], "owner_selection");
+        assert_eq!(stuck["progress"]["waiting_on"], json!(["lead_selected_not_published: lab-director-hypothesis has not been written"]));
+        let churn = &stuck["progress"]["lanes_since_milestone"]["by_action_type"]["simulation_data_generation_followup"];
+        assert_eq!((churn["total"].as_u64(), churn["failed"].as_u64()), (Some(67), Some(54)));
+        assert!(stuck["findings"].as_array().unwrap().iter().any(|f| f["signature"] == signature));
+
+        let reports = announce_work_order_results(&paths, "cycle-test").unwrap();
+        assert_eq!(reports.len(), 1, "hand back the existing audit results without a fourth scout");
+        assert!(!work_orders_in_flight(&paths, "cycle-test"));
+        let director = reports[0]["lane_id"].as_str().unwrap();
+        let director_plan = lead_hold_read(&lanes.join(director).join("role-plan.json"));
+        let message = director_plan["planner_metadata"]["supervisor_instruction"]["message"].as_str().unwrap();
+        assert!(message.contains("wo-5e0318d3b1") && message.contains("followup-scout-846/result.json"));
+        assert!(message.contains("wo-a4e7863f3d") && message.contains("COULD NOT BE CARRIED OUT"));
+        for n in [845, 847, 848] {
+            assert!(message.contains(&format!("followup-scout-{n}/result.json")));
+        }
+        recoveries.clear();
+        collect_failed_literature_recovery_actions(&paths, "cycle-test", &mut recoveries).unwrap();
+        assert!(recoveries.is_empty(), "the returned order cannot still resume on its own");
+        assert_eq!(progress()["progress"]["current_milestone"], "owner_selection");
+
+        // A later admissible Director decision can now advance the cycle.
+        let mut contract = test_contract("lab-director", PathBuf::from("task.md"));
+        contract.lane_id = director.to_string();
+        let successor = lead_hold_replacement("a Director-selected successor method");
+        assert!(project_with_valid_landscape(&paths, &contract, &successor).unwrap().is_some());
+        let advanced = progress();
+        assert_eq!(advanced["progress"]["current_milestone"], "lead_selected");
+        assert!(!advanced["findings"].as_array().unwrap().iter().any(|f| f["signature"] == signature));
+    }
+
+    #[test]
+    fn claim_reviews_wait_for_a_successor_while_the_ordered_audit_runs() {
+        // MEASURED ON cycle-a-20260919, 2026-11-25: all 20 frontier
+        // papers were resolved. Scouts 755, 837 and 839 reviewed other queues.
+        // With the lead withdrawn, ordinary claim reviews kept winning the
+        // only slot while Scout 852, the Director's successor audit, waited.
+        use crate::labdirector::{announce_work_order_results, dependency_blocker_for_lane, work_orders_in_flight};
+        let (dir, paths, hypothesis_path) = lead_hold_setup(lead_hold_now_ms() - 60_000);
+        let cycle = "cycle-test";
+        let state = |kind, value| {
+            lead_hold_write(&paths.runtime_root.join(format!("state/{cycle}-{kind}.json")), value);
+        };
+        let withdrawn = json!({"status": "withdrawn", "requery_decision": "restart",
+            "selected_hypothesis": null, "generated_by": "followup-lab-director-2157",
+            "projection_source": "lab_director_lane_result"});
+        lead_hold_write(&hypothesis_path, withdrawn.clone());
+        write_valid_test_landscape(&paths);
+        let gate = json!({"gate_passed": false, "gatekeeper_review_status": "partial",
+            "current_hypothesis_identity": {"lead_key": null},
+            "gatekeeper_pending_rubrics": ["impact", "novelty"]});
+        for (kind, value) in [
+            ("frontier-harvest", json!({"top_k": [
+                {"review_status": "accepted"}, {"review_status": "excluded", "review_reason": "out of scope"},
+            ]})),
+            ("lead-selection-rejections", json!({"rejections": [{
+                "reasons": ["frontier_harvest_unreviewed: 12 harvested top-K candidates"],
+                "rejected_at": "2026-09-20T05:50:25Z",
+            }]})),
+            ("sota-cards", json!({"cards": [{}]})),
+            ("field-beliefs", json!({"beliefs": [{}]})),
+            ("candidate-slate", json!({"candidates": [{}]})),
+            ("expert-panel", json!({"ranking": [{}]})),
+            ("novelty-audit", json!({"audits": [{}]})),
+            ("candidate-feasibility", json!({"assessments": [{}]})),
+            ("expert-selection", json!({"rounds": [{"spent_round": {"owner_selection": {
+                "candidate_id": "release", "decision": "slate_released", "selected_at": "2026-11-09T02:40:34Z",
+            }}}]})),
+            ("gate-review", gate.clone()),
+        ] {
+            state(kind, value);
+        }
+        let lanes = paths.runtime_root.join("lanes").join(cycle);
+        let stamp = |minutes| (chrono::Utc::now() - chrono::Duration::minutes(minutes))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let contract = |role, id: &str, plan| {
+            let mut contract = test_contract(role, lanes.join(id).join("task.md"));
+            contract.lane_id = id.to_string();
+            lead_hold_write(&lanes.join(id).join("role-plan.json"), plan);
+            lead_hold_write(&lanes.join(id).join("lane-contract.json"), json!(contract));
+            contract
+        };
+        let finish = |id: &str, status, completed_at| {
+            lead_hold_write(&lanes.join(id).join("final-status.json"), json!({
+                "lane_id": id, "status": status, "completed_at": completed_at,
+            }));
+        };
+        for id in ["followup-scout-755", "followup-scout-837", "followup-scout-839"] {
+            contract("scout", id, json!({"role": "scout", "action_type": "abstract_review_followup"}));
+            finish(id, "failed", "2026-11-21T18:03:39Z");
+        }
+        contract("lab-runner", "followup-runner-868", json!({"role": "lab-runner"}));
+        finish("followup-runner-868", "completed", "2026-11-25T06:00:00Z");
+        lead_hold_write(&lanes.join("followup-runner-868/run-state.json"), json!({
+            "role": "lab-runner", "status": "completed",
+        }));
+        let brief = "labdirector-next-action-followup-lab-director-2080";
+        state("work-orders", json!({"watermark": stamp(20), "orders": [{
+            "order_id": "wo-8d74a3e307", "source": "lab-director", "brief_id": brief,
+            "issued_by": "followup-lab-director-2080", "issued_at": stamp(21), "recorded_at": stamp(20),
+            "lead_key": "withdrawn", "role": "scout", "type": "novelty_followup",
+            "description": "Return the closest existing procedural comparison for the successor.",
+            "status": "standing", "done_at": null, "done_lanes": [], "reported_at": null,
+        }]}));
+        let scout = contract("scout", "followup-scout-852", json!({
+            "role": "scout", "action_type": "novelty_followup", "source_brief_id": brief,
+        }));
+        let review_plan = json!({"role": "gatekeeper", "action_type": "independent_gate_review_followup",
+            "source_brief_id": "gate-review-impact", "planner_metadata": {
+                "target_rubric": "impact", "gate_review_lead_key": null, "validation_results": [{}],
+            }});
+        let review = contract("gatekeeper", "followup-gatekeeper-2136", review_plan.clone());
+        let observe = || {
+            let output = std::process::Command::new("node").arg("-e").arg(r#"
+                const m = require(process.argv[1]);
+                const progress = m.deriveProgress({cwd: process.argv[2], cycleId: 'cycle-test'});
+                console.log(JSON.stringify({progress, findings: m.stallFindings({progress, config: m.supervisorConfig({})})}));
+            "#).arg(concat!(env!("CARGO_MANIFEST_DIR"), "/../../src/orchestrator/cycle_progress.js"))
+                .arg(dir.path()).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+        };
+        let churn = |observation: &serde_json::Value| observation["findings"].as_array().unwrap().iter().any(|f| {
+            f["signature"] == "lane_churn:owner_selection:abstract_review_followup"
+        });
+        let stuck = observe();
+        assert_eq!(stuck["progress"]["current_milestone"], "owner_selection");
+        assert_eq!(stuck["progress"]["waiting_on"], json!(["lead_selected_not_published: lab-director-hypothesis has not been written"]));
+        assert_eq!(stuck["progress"]["lanes_since_milestone"]["by_action_type"]["abstract_review_followup"]["total"], 3);
+        assert!(churn(&stuck));
+        assert!(work_orders_in_flight(&paths, cycle));
+
+        // The scheduler checks dependencies in rank order before allocating the slot.
+        let eligible = [&review, &scout].into_iter()
+            .find(|lane| dependency_blocker_for_lane(&paths, cycle, lane).unwrap().is_none()).unwrap();
+        assert_eq!(eligible.lane_id, "followup-scout-852", "give the sole slot to the already queued audit");
+        let reason = dependency_blocker_for_lane(&paths, cycle, &review).unwrap().unwrap();
+        assert!(reason.starts_with("waiting-for-lab-director-hypothesis status=withdrawn"));
+        let mut adjudication = review_plan;
+        let metadata = &mut adjudication["planner_metadata"];
+        metadata["review_mode"] = json!("lab_director_blocker_adjudication");
+        metadata["lab_director_blocker_review_requests"] = json!([{
+            "blocker": "The historical report omits an evidence reference.",
+            "rationale": "The completed audit resolves the question.",
+            "evidence_refs": ["followup-runner-868/result.json"],
+        }]);
+        let adjudicator = contract("gatekeeper", "followup-gatekeeper-2139", adjudication);
+        assert!(dependency_blocker_for_lane(&paths, cycle, &adjudicator).unwrap().is_none());
+        assert_eq!(lead_hold_read(&hypothesis_path), withdrawn);
+        assert_eq!(lead_hold_read(&paths.runtime_root.join("state/cycle-test-gate-review.json")), gate);
+
+        // Replay the worker's completion, then use the normal handback and lead projection.
+        finish(&eligible.lane_id, "completed", stamp(0).as_str());
+        lead_hold_write(&lanes.join(&eligible.lane_id).join("result.json"), json!({"status": "completed"}));
+        let reports = announce_work_order_results(&paths, cycle).unwrap();
+        assert_eq!(reports.len(), 1);
+        let director = reports[0]["lane_id"].as_str().unwrap();
+        let director_plan = lead_hold_read(&lanes.join(director).join("role-plan.json"));
+        let message = director_plan["planner_metadata"]["supervisor_instruction"]["message"].as_str().unwrap();
+        assert!(message.contains("wo-8d74a3e307") && message.contains("followup-scout-852/result.json"));
+        assert_eq!(observe()["progress"]["current_milestone"], "owner_selection");
+        let mut director_lane = test_contract("lab-director", PathBuf::from("task.md"));
+        director_lane.lane_id = director.to_string();
+        let successor = lead_hold_replacement("a Director-selected successor method");
+        assert!(project_with_valid_landscape(&paths, &director_lane, &successor).unwrap().is_some());
+        let advanced = observe();
+        assert_eq!(advanced["progress"]["current_milestone"], "lead_selected");
+        assert!(!churn(&advanced));
+        assert!(dependency_blocker_for_lane(&paths, cycle, &review).unwrap().is_none());
+    }
+
+    #[test]
     fn full_disposition_register_unblocks_measured_chronicle_owner_selection_churn() {
         // MEASURED ON cycle-a-20260919, 2026-11-09: six Chronicle
         // evidence lanes finished at owner_selection with a withdrawn lead and

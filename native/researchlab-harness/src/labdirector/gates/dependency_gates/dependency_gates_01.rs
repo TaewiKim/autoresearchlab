@@ -803,6 +803,15 @@ pub(crate) fn lab_runner_methods_followup_has_executable_handoff(role_plan: &Val
             || executable_validation_spec_present(planner_analysis_request))
 }
 
+/// Whether the LabDirector's lead record says the lead was withdrawn, so no
+/// claim stands for a gate review to judge until a successor is selected.
+pub(crate) fn lead_is_withdrawn(paths: &AppPaths, cycle_id: &str) -> bool {
+    read_json_cached(&state_root(paths).join(format!("{cycle_id}-lab-director-hypothesis.json")))
+        .ok()
+        .and_then(|lead| lead.get("status").and_then(Value::as_str).map(|status| status == "withdrawn"))
+        .unwrap_or(false)
+}
+
 /// Why a gate review would only re-read what the last round already read.
 ///
 /// A round moves a rubric only if it has something new to judge: a different
@@ -813,12 +822,25 @@ pub(crate) fn lab_runner_methods_followup_has_executable_handoff(role_plan: &Val
 /// material, scored nothing higher -- it could not -- and was the fifth flat round
 /// that halted the cycle. Four more such lanes were queued behind them.
 ///
-/// Holds until a runner produces evidence after that round, or the lead changes.
+/// Holds until a successor is selected after withdrawal or, for an active
+/// lead already reviewed, until new evidence or a changed lead is available.
 pub(crate) fn gate_review_has_nothing_new(
     paths: &AppPaths,
     cycle_id: &str,
     target_rubric: Option<&str>,
 ) -> Option<String> {
+    let lead_path = state_root(paths).join(format!("{cycle_id}-lab-director-hypothesis.json"));
+    let lead = read_json_cached(&lead_path).ok();
+    // MEASURED ON cycle-a-20260919, 2026-11-25: after withdrawal,
+    // unreviewed rubrics still let ordinary claim reviews take the only worker
+    // slot ahead of the Director's queued successor audit. A pending rubric
+    // is current work only when there is a lead to review.
+    if lead.as_ref().and_then(|value| value.get("status")).and_then(Value::as_str) == Some("withdrawn") {
+        return Some(format!(
+            "waiting-for-lab-director-hypothesis status=withdrawn path={}",
+            lead_path.display()
+        ));
+    }
     let target_rubric = target_rubric.unwrap_or("").trim();
     let rubric_still_pending = !target_rubric.is_empty()
         && read_json(&state_root(paths).join(format!("{cycle_id}-gate-review.json")))
@@ -866,7 +888,7 @@ pub(crate) fn gate_review_has_nothing_new(
         .and_then(Value::as_str)
         .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
         .map(|ts| ts.with_timezone(&Utc))?;
-    let lead = read_json(&state_root(paths).join(format!("{cycle_id}-lab-director-hypothesis.json"))).ok()?;
+    let lead = lead?;
     let lead_statement: String = lead
         .get("statement")
         .and_then(Value::as_str)

@@ -505,6 +505,7 @@ function buildGateReview({
         labDirectorResponse,
         previousReviewContext,
         chronicleResearchContext,
+        leadWithdrawn: currentIdentity.withdrawn,
         // ACM-CP anti-suppression guard on the pivot decision, computed from the
         // append-only progress log of PRIOR rounds (this round is appended after
         // the review is written). "deny" => the best-so-far lead is still
@@ -515,7 +516,9 @@ function buildGateReview({
             // improving itself" (protect) from "a different better candidate"
             // (promote). Passing only the composite without the key made the lead
             // promote against ITSELF and defeated the anti-thrash guard.
-            const currentKey = hypothesisProgress.hypothesisKey({
+            // A withdrawal leaves only the ledger's historical-lead and
+            // pending-request rules. There is no current lead to score or lock.
+            const currentKey = currentIdentity.withdrawn ? null : hypothesisProgress.hypothesisKey({
               hypothesisId: stableHypothesisId(root, cycleId, currentIdentity),
               statement: currentIdentity.primary_text || currentIdentity.text || "",
               familyRoot: (currentIdentity.accessions || [])[0] || null,
@@ -536,7 +539,7 @@ function buildGateReview({
             // COMMIT_NOVELTY_ROUNDS novelty-reviewed gate rounds to raise novelty
             // in place; after them the ordinary rules (stall, strictly-better
             // candidate) decide, and a valid falsification releases it at once.
-            const strongValidationCommit = (() => {
+            const strongValidationCommit = currentKey && (() => {
               try {
                 const validation = progressSignals?.latestValidationSummary || null;
                 if (!hypothesisProgress.validationIsStatisticallyStrong(validation)) {
@@ -562,8 +565,8 @@ function buildGateReview({
             const decision = hypothesisProgress.evaluateLeadSupersession({
               records: hypothesisProgress.readProgressLog(root, cycleId),
               cycleId,
-              proposedComposite: hypothesisProgress.compositeScore(reviewRubric),
-              proposedRubric: reviewRubric,
+              proposedComposite: currentKey ? hypothesisProgress.compositeScore(reviewRubric) : null,
+              proposedRubric: currentKey ? reviewRubric : null,
               proposedHypothesisKey: currentKey,
               proposedStatement: currentIdentity.primary_text || currentIdentity.text || "",
               currentLeadKey: currentKey,
@@ -581,7 +584,7 @@ function buildGateReview({
               // gate read runner-138 as the NEW lead's validation and released the
               // new lead's refinement window at once. The native lead hold binds
               // evidence the same way (a handoff written after the selection).
-              leadValidationSummary: validationOfCurrentLead({
+              leadValidationSummary: currentKey && validationOfCurrentLead({
                 root,
                 cycleId,
                 progressSignals,
@@ -600,7 +603,7 @@ function buildGateReview({
               // condition: a replacement that names no research question cannot
               // supersede the lead. 118 of 118 named none on cycle-g-v89, and the
               // three-methods-per-question rule was never once evaluated.
-              proposedReplacement: latestReplacementRecord(root, cycleId, currentKey),
+              proposedReplacement: currentKey && latestReplacementRecord(root, cycleId, currentKey),
               // This call site looked. Absence below is the director's answer,
               // not an unwired guard.
               replacementLookupPerformed: true,
@@ -638,7 +641,8 @@ function buildGateReview({
               // The ledger's protection, then what the reviewers already cleared:
               // this file is how the dispatchers that build their own director
               // lanes (the native recovery lanes) learn both.
-              const directive = (leadProtectionPrefix(decision) || "") + retainedStrengthsPrefix(aggregateReview?.rubric);
+              const directive = (leadProtectionPrefix(decision) || "")
+                + (currentIdentity.withdrawn ? "" : retainedStrengthsPrefix(aggregateReview?.rubric));
               writeJson(path.join(runtimeRoot(cwd), "state", `${cycleId}-lead-protection.json`), {
                 ts: new Date().toISOString(),
                 cycle_id: cycleId,
@@ -706,6 +710,7 @@ function buildGateReview({
   const baseGatePassed =
     conclusionReadyForGate;
   const gatePassed =
+    !currentIdentity.withdrawn &&
     aggregateReview.verdict === "approve" &&
     gatekeeperPendingRubrics.length === 0 &&
     scientificValueGate.required_for_gate !== true &&
@@ -912,7 +917,7 @@ function buildGateReview({
   // bound, non-suppressible critical memory (see src/reporting/hypothesis_progress
   // .js). Side-effect only; never block gate assembly.
   try {
-    if (aggregateReview.reviews.length > 0) {
+    if (!currentIdentity.withdrawn && aggregateReview.reviews.length > 0) {
       const prior = hypothesisProgress.readProgressLog(root, cycleId);
       // Stable hypothesis identity: the LabDirector paraphrases the lead statement
       // every round, so keying on the statement fragments one lead into many. Use

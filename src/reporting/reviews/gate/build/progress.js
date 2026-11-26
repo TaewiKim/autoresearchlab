@@ -393,6 +393,27 @@ function isSupersededPublishedEightGeneGatekeeperReview(review, progressSignals,
 function currentHypothesisIdentity({ root, cycleId, summary }) {
   const hypothesisPath = path.join(root, "state", `${cycleId}-lab-director-hypothesis.json`);
   const currentHypothesis = readJsonIfExistsSafe(hypothesisPath) || {};
+  let mtime = 0;
+  try {
+    mtime = fs.statSync(hypothesisPath).mtimeMs;
+  } catch {}
+  // MEASURED ON cycle-a-20260919, 2026-11-25: after the Director
+  // withdrew the lead, the gate treated a historical focus hypothesis as
+  // current and instructed the next Director to refine it in place.
+  if (currentHypothesis.status === "withdrawn") {
+    return {
+      withdrawn: true,
+      source_path: hypothesisPath,
+      source_mtime: mtime,
+      selected_at_ms: 0,
+      accessions: [],
+      dataset_keys: [],
+      primary_text: "",
+      lead_key: null,
+      ignored_stale_dataset_accessions: [],
+      text: "",
+    };
+  }
   const focusHypotheses = asArray(summary?.focus_hypotheses).map((item) => ({
     statement: item?.statement,
     hypothesis_statement: item?.hypothesis_statement,
@@ -446,10 +467,6 @@ function currentHypothesisIdentity({ root, cycleId, summary }) {
   const accessions = primaryAccessions.length > 0
     ? primaryAccessions
     : extractGeoAccessions(text);
-  let mtime = 0;
-  try {
-    mtime = fs.statSync(hypothesisPath).mtimeMs;
-  } catch {}
   return {
     source_path: fs.existsSync(hypothesisPath) ? hypothesisPath : null,
     source_mtime: mtime,

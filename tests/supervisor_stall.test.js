@@ -41,6 +41,7 @@ const {
 } = require("../src/orchestrator/cycle_budget");
 
 const { maybeRunMaintainer, __private } = require("../src/orchestrator/maintainer");
+const { buildGateReview } = require("../src/reporting/gate_review");
 const hypothesisProgress = require("../src/reporting/hypothesis_progress");
 const { validationOfCurrentLead } = require("../src/reporting/reviews/gate/build/progress");
 const { runnerLeadMatchScore } = require("../src/agents/shared/lead_evidence_match");
@@ -273,6 +274,83 @@ test("a published blocking conclusion review advances out of gate_review", () =>
   const progress = deriveProgress({ cwd, cycleId: CYCLE, now: Date.parse("2026-09-20T15:00:00Z") });
   assert.equal(progress.current_milestone, "conclusion");
   assert.equal(progress.next_milestone, null);
+});
+
+test("a withdrawn lead leaves the Director free to select a successor despite historical focus hypotheses", (t) => {
+  // MEASURED ON cycle-a-20260919, 2026-11-25: the progress observer
+  // counted 222 interpretations at owner_selection after Director 2153 withdrew
+  // the incumbent. The next gate builds started a novelty window on a historical
+  // loss/refinement hypothesis that was still in the researcher view.
+  const cwd = buildCycle("owner_selection");
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  const root = path.join(cwd, ".research-lab");
+  const now = Date.parse("2026-11-25T06:52:55.657Z");
+  const observe = () => recordProgress({ cwd, cycleId: CYCLE, now }).progress;
+  const signature = "lane_churn:owner_selection:runner_result_interpretation_followup";
+  const churn = (progress) => stallFindings({ progress, config: supervisorConfig({}), now })
+    .find((finding) => finding.signature === signature);
+  fs.rmSync(path.join(stateDir(cwd), `${CYCLE}-owner-selection.json`));
+  writeState(cwd, "expert-selection", { rounds: [{ spent_round: { owner_selection: {
+    candidate_id: "release", decision: "slate_released", selected_at: "2026-11-09T02:40:34Z",
+  } } }] });
+  const retired = {
+    status: "withdrawn", selected_hypothesis: null, requery_decision: "restart",
+    projection_source: "lab_director_lane_result", generated_by: "followup-lab-director-2154",
+    selected_at_epoch_ms: Date.parse("2026-11-25T06:42:45Z"),
+    withdrawn_hypothesis: { statement: "Five robot policies converge on a shared demonstration bank." },
+  };
+  writeState(cwd, "lab-director-hypothesis", retired);
+  for (let i = 0; i < 222; i += 1) {
+    addFinishedLane(cwd, { laneId: `followup-analyst-${1629 + i}`,
+      actionType: "runner_result_interpretation_followup", finishedMs: now - (240 - i) * MINUTE });
+  }
+  const stuck = observe();
+  assert.equal(stuck.current_milestone, "owner_selection");
+  assert.equal(stuck.reached_at, "2026-11-09T02:40:34.000Z");
+  assert.deepEqual(stuck.waiting_on, ["lead_selected_not_published: lab-director-hypothesis has not been written"]);
+  assert.equal(stuck.lead.status, "withdrawn");
+  assert.equal(stuck.lanes_since_milestone.by_action_type.runner_result_interpretation_followup.total, 222);
+  assert.ok(churn(stuck));
+
+  const historical = "A loss-by-refinement factorial changes robot policy support-distance slopes.";
+  const staleDeny = { decision: "deny", reason: "novelty_refinement_window",
+    lead: hypothesisProgress.hypothesisKey({ statement: historical }) };
+  hypothesisProgress.appendDecisionEvent(root, CYCLE, staleDeny, fs, "2026-11-25T06:44:30Z");
+  writeState(cwd, "lead-protection", { ...staleDeny, directive: "Keep refining the historical lead." });
+  const gateDir = addFinishedLane(cwd, { laneId: "followup-gatekeeper-2116",
+    actionType: "independent_gate_review_followup", finishedMs: now - 4 * MINUTE });
+  writeJson(path.join(gateDir, "result.json"), { status: "completed", output_last_message: JSON.stringify({
+    verdict: "reject", reviewer_focus_rubric: "novelty", restart_recommended: true,
+    rubric: [{ name: "novelty", score: 55, reasons: ["The incumbent procedure is incremental."], applicable: true }],
+  }) });
+  const build = () => buildGateReview({ cwd, cycleId: CYCLE,
+    researcherView: { summary: { objective: "Robot imitation coverage", focus_hypotheses: [{ statement: historical }] } },
+    conclusionReview: { conclusion_gate_passed: true, conclusion_rubric: [{ name: "novelty", score: 55 }] },
+  }).review;
+  const protection = () => JSON.parse(fs.readFileSync(path.join(stateDir(cwd), `${CYCLE}-lead-protection.json`)));
+  const gate = build();
+  assert.equal(gate.current_hypothesis_identity.lead_key, null);
+  assert.equal(gate.gate_passed, false);
+  assert.equal(protection().decision, "allow");
+  assert.equal(protection().directive, "");
+  assert.ok(gate.recommended_followup_actions.some((action) =>
+    action.type === "gate_restart_followup" && action.preferred_role === "lab-director"));
+  assert.deepEqual(hypothesisProgress.readDecisionTrail(root, CYCLE).map(({ decision }) => decision.reason),
+    ["novelty_refinement_window", "no_active_lead_to_protect"]);
+  assert.ok(hypothesisProgress.readProgressLog(root, CYCLE).every((row) => row.event_type === "lead_supersession_decision"));
+  assert.equal(observe().current_milestone, "owner_selection", "the gate cannot select a lead");
+
+  // Replay an accepted Director decision after the successor screening.
+  writeState(cwd, "lab-director-hypothesis", { status: "selected",
+    statement: "A fixed-budget support allocation changes placement success.", selected_at_epoch_ms: now,
+    generated_by: "followup-lab-director-2155", projection_source: "lab_director_lane_result",
+  });
+  const advanced = observe();
+  assert.equal(advanced.current_milestone, "lead_selected");
+  assert.equal(advanced.advanced, true);
+  assert.equal(churn(advanced), undefined);
+  assert.notEqual(build().current_hypothesis_identity.lead_key, staleDeny.lead);
+  assert.equal(protection().reason, "novelty_refinement_window", "a selected successor gets its own window");
 });
 
 test("accepted document releases advance a withdrawn cycle past the measured owner_selection churn", (t) => {

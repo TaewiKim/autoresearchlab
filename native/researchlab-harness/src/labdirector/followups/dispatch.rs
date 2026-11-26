@@ -422,6 +422,17 @@ pub fn dispatch_followup_lanes(
         {
             continue;
         }
+        // MEASURED ON cycle-a-20260919, 2026-11-25/26: after the
+        // director withdrew the lead, the gate review still recommended one
+        // review per rubric. Each plan opened five gatekeepers, the launch
+        // check held them (gate_review_has_nothing_new), a blocked-lane
+        // recovery director retired them, and the next plan opened five more:
+        // 17 rounds, 85 gatekeepers and 17 director lanes from 11:33Z to
+        // 04:38Z with no successor screened. With no lead there is no claim to
+        // review, so no review lane is opened until a successor is selected.
+        if action_type == "independent_gate_review_followup" && lead_is_withdrawn(paths, cycle_id) {
+            continue;
+        }
         // A director that restarted with nothing to dispatch has said what it has to
         // say; the plan's re-queued requery would only repeat it. See
         // director_requery_would_repeat_idle_restart.

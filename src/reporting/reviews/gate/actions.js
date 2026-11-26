@@ -620,6 +620,7 @@ function authoritativeGateFollowupActions({
   previousReviewContext,
   chronicleResearchContext,
   leadSupersession = null,
+  leadWithdrawn = false,
 }) {
   const candidateHypotheses =
     aggregateReview?.cross_family_alternatives?.length > 0
@@ -672,7 +673,7 @@ function authoritativeGateFollowupActions({
   // was protected. Anything routed to lab-director as a requery now carries the
   // same lead identity and the same anti-churn rule, whoever proposed it.
   const leadProtection = leadProtectionPrefix(leadSupersession);
-  const retainedStrengths = retainedStrengthsPrefix(aggregateReview?.rubric);
+  const retainedStrengths = leadWithdrawn ? "" : retainedStrengthsPrefix(aggregateReview?.rubric);
   const isDirectorRequery = (action) =>
     String(action?.preferred_role || "") === "lab-director" ||
     String(action?.type || "").includes("requery") ||
