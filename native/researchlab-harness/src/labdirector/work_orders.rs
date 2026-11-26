@@ -941,6 +941,27 @@ pub(crate) fn trace_order(action: &Value, stage: &str) {
     }
 }
 
+static DROPPED_ACTIONS: std::sync::OnceLock<std::sync::Mutex<BTreeMap<String, u32>>> = std::sync::OnceLock::new();
+
+fn dropped_actions() -> &'static std::sync::Mutex<BTreeMap<String, u32>> {
+    DROPPED_ACTIONS.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+}
+
+/// Record the dispatcher filter (its source line) that dropped any ranked
+/// action, work order or not.
+///
+/// MEASURED ON cycle-a-20260919, 2026-11-26: after the withdrawn-lead
+/// gate reviews stopped, run-plan opened nothing for over an hour while the plan
+/// held fourteen ranked actions, and nothing recorded which filter dropped each.
+pub(crate) fn trace_dropped_action(action: &Value, line: u32) {
+    trace_order(action, &format!("dropped by the dispatcher filter at dispatch.rs:{line}"));
+    let field = |key: &str| action.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+    let key = format!("{}|{}|{}", field("preferred_role"), field("type"), field("brief_id"));
+    if let Ok(mut dropped) = dropped_actions().lock() {
+        dropped.insert(key, line);
+    }
+}
+
 pub(crate) fn work_order_trace_path(paths: &AppPaths, cycle_id: &str) -> PathBuf {
     state_root(paths).join(format!("{cycle_id}-work-order-dispatch-trace.json"))
 }
@@ -948,9 +969,15 @@ pub(crate) fn work_order_trace_path(paths: &AppPaths, cycle_id: &str) -> PathBuf
 /// Write the stages of this dispatch and start the next one clean.
 pub(crate) fn flush_order_trace(paths: &AppPaths, cycle_id: &str, outcome: &str) {
     let stages = order_trace().lock().map(|mut trace| std::mem::take(&mut *trace)).unwrap_or_default();
+    let dropped = dropped_actions().lock().map(|mut dropped| std::mem::take(&mut *dropped)).unwrap_or_default();
     let _ = write_json(
         &work_order_trace_path(paths, cycle_id),
-        &json!({"at": now_iso(), "dispatch": outcome, "last_stage_by_order": stages}),
+        &json!({
+            "at": now_iso(),
+            "dispatch": outcome,
+            "last_stage_by_order": stages,
+            "dropped_action_filter_line": dropped,
+        }),
     );
 }
 

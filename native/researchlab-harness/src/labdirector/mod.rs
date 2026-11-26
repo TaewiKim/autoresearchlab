@@ -31,7 +31,7 @@ pub(crate) mod decision_ledger;
 pub(crate) mod commitments;
 pub(crate) use work_orders::{
     announce_gpu_route, announce_work_order_results, append_capability_provisioning_actions, flush_order_trace,
-    trace_order,
+    trace_dropped_action, trace_order,
     standing_work_order_payloads, work_order_dispatchable, work_orders_director_context, work_orders_in_flight,
 };
 mod sota_cards;

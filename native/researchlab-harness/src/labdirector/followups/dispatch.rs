@@ -420,6 +420,7 @@ pub fn dispatch_followup_lanes(
                     | "hypothesis_followup"
             )
         {
+            trace_dropped_action(&action, line!());
             continue;
         }
         // MEASURED ON cycle-a-20260919, 2026-11-25/26: after the
@@ -431,6 +432,7 @@ pub fn dispatch_followup_lanes(
         // 04:38Z with no successor screened. With no lead there is no claim to
         // review, so no review lane is opened until a successor is selected.
         if action_type == "independent_gate_review_followup" && lead_is_withdrawn(paths, cycle_id) {
+            trace_dropped_action(&action, line!());
             continue;
         }
         // A director that restarted with nothing to dispatch has said what it has to
@@ -444,6 +446,7 @@ pub fn dispatch_followup_lanes(
                 // work_orders_in_flight.
                 || work_orders_in_flight(paths, cycle_id))
         {
+            trace_dropped_action(&action, line!());
             continue;
         }
         let direct_analyst_handoff_runner =
@@ -459,6 +462,7 @@ pub fn dispatch_followup_lanes(
         ) && !direct_analyst_handoff_runner
             && !value_targets_current_geo(&action, &current_hypothesis_accessions)
         {
+            trace_dropped_action(&action, line!());
             continue;
         }
         if gate_reject_requires_chronicle_first
@@ -486,6 +490,7 @@ pub fn dispatch_followup_lanes(
                         | "data_acquisition_followup"
                 );
             if is_gate_reject_recovery && !direct_analyst_handoff_runner {
+                trace_dropped_action(&action, line!());
                 continue;
             }
         }
@@ -502,6 +507,7 @@ pub fn dispatch_followup_lanes(
         if action_type == "chronicle_gate_deliberation_followup"
             && completed_chronicle_gate_deliberation
         {
+            trace_dropped_action(&action, line!());
             continue;
         }
         if action_type == "novelty_followup"
@@ -514,6 +520,7 @@ pub fn dispatch_followup_lanes(
                 )
             })
         {
+            trace_dropped_action(&action, line!());
             continue;
         }
         let completed_labdirector_gate_restart_for_source =
@@ -534,11 +541,13 @@ pub fn dispatch_followup_lanes(
             && (completed_labdirector_gate_restart_for_source
                 || labdirector_gate_restart_is_rival_bookkeeping)
         {
+            trace_dropped_action(&action, line!());
             continue;
         }
         if has_completed_gate_labdirector_requery
             && brief_id == "hypothesis-gate-literature-restart"
         {
+            trace_dropped_action(&action, line!());
             continue;
         }
         if matches!(
@@ -552,6 +561,7 @@ pub fn dispatch_followup_lanes(
                 brief_id,
             )
         {
+            trace_dropped_action(&action, line!());
             continue;
         }
         if let Some(required_source) = action
@@ -559,6 +569,7 @@ pub fn dispatch_followup_lanes(
             .and_then(Value::as_str)
         {
             if !completed_chronicle_evidence_request_exists(paths, cycle_id, required_source) {
+                trace_dropped_action(&action, line!());
                 continue;
             }
         }
@@ -572,6 +583,7 @@ pub fn dispatch_followup_lanes(
                 .unwrap_or(false)
             && !completed_chronicle_gate_deliberation
         {
+            trace_dropped_action(&action, line!());
             continue;
         }
         let unresolved_conclusion_strategy_requery = action_type == "lab_director_requery_followup"
@@ -593,6 +605,7 @@ pub fn dispatch_followup_lanes(
                 != Some("hypothesis_gate_failed_labdirector_requery_required")
             && has_completed_labdirector_requery
         {
+            trace_dropped_action(&action, line!());
             continue;
         }
         let gate_labdirector_requery_pending = open_action_counts
@@ -619,6 +632,7 @@ pub fn dispatch_followup_lanes(
             // completed data scout, and this is the action that completes one.
             && !no_completed_data_scout
         {
+            trace_dropped_action(&action, line!());
             continue;
         }
         let action_candidate_payload = action
